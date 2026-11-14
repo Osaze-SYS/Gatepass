@@ -15,7 +15,7 @@ Built as a portfolio project to show a complete, realistic system: accounts, pay
 - **Checkout:** pay with Paystack (or the practice checkout), tickets held for 15 minutes, free events skip payment.
 - **Platform fee:** a percentage (and optional flat amount) per paid ticket, paid by the buyer on top or deducted from the organizer.
 - **Tickets:** signed QR codes on a ticket page (printable) and by email.
-- **Refunds:** buyers can refund themselves until a cutoff set by the organizer; organizers can refund any order; used tickets cannot be refunded.
+- **Refunds:** buyers refund themselves instantly until a cutoff the organizer sets; after the cutoff they send a request that the organizer approves or declines (the organizer is emailed, and so is the buyer if it is declined); organizers can refund any order at any time; used tickets cannot be refunded.
 - **Gate scanner:** camera or typed code, rejects forged, repeated and refunded tickets.
 - **Dashboard:** earnings, fees, refunds, sales per ticket type, attendee and order lists.
 - **Rate limiting:** login, checkout, refunds, uploads and the API overall.
@@ -29,7 +29,7 @@ npm install
 cp .env.example .env        # Windows: copy .env.example .env   then set APP_SECRET
 npm run seed                # demo organizer + 4 events with pictures
 npm start                   # http://localhost:3000
-npm test                    # 17 automated tests
+npm test                    # 23 automated tests
 ```
 
 Demo organizer: `demo@gatepass.dev` / `password123`.
@@ -83,6 +83,8 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 **Refunds in three steps so money and tickets stay in step.** (1) Lock the order, void its tickets and mark it `refund_pending`. (2) Ask the payment provider to return the money. (3) On success mark it `refunded` and release the stock; on failure undo step 1. A crash in the middle leaves a `refund_pending` order that can simply be retried.
 
+**Refund requests.** Instant refunds stop at the organizer's cutoff. After that, and until the event starts, the buyer (who must give the email used at checkout) can send one request per order. It appears at the top of the organizer's orders list, and the organizer is emailed. Approving runs the same three-step refund as above; declining leaves the tickets valid and emails the buyer the organizer's note. Any other refund of the same order, such as the organizer refunding directly, settles the waiting request automatically.
+
 **Platform fee.** Per ticket: `round(price x percent) + flat`. Each order stores the subtotal, fee, amount charged and organizer payout, so reports never have to recompute history when rates change. With `FEE_PAYER=buyer` the fee is added on top; with `organizer` it is deducted from the payout.
 
 **Pictures in the database.** Stored as `BYTEA`, so they survive hosts with temporary disks. The browser shrinks photos to at most 1600 px wide before upload; the server checks the real file signature (not just the declared type), limits the size, and serves them with long cache headers.
@@ -104,7 +106,8 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | GET | `/api/events/:id`, `/api/images/:id` | Event detail, pictures |
 | POST | `/api/checkout` | Reserve tickets and start payment |
 | GET | `/api/orders/:reference` | Order status, tickets, refund eligibility |
-| POST | `/api/orders/:reference/refund` | Buyer refund (needs checkout email) |
+| POST | `/api/orders/:reference/refund` | Instant buyer refund before the cutoff (needs checkout email) |
+| POST | `/api/orders/:reference/refund-request` | Buyer asks the organizer after the cutoff |
 | POST | `/api/webhooks/paystack` | Signed payment confirmation |
 | POST | `/api/organizer/events` | Create event with ticket types (auth) |
 | POST, DELETE | `/api/organizer/events/:id/images[/:imageId]` | Add, remove pictures (auth) |
@@ -112,6 +115,7 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | GET | `/api/organizer/events` | Earnings, fees, refunds, sales (auth) |
 | GET | `/api/organizer/events/:id/orders` | Orders for one event (auth) |
 | POST | `/api/organizer/orders/:reference/refund` | Organizer refund (auth) |
+| POST | `/api/organizer/orders/:reference/refund-request/decide` | Approve or decline a buyer's request (auth) |
 | POST | `/api/checkin` | Validate and consume a ticket (auth) |
 
 ## Configuration
@@ -145,7 +149,7 @@ src/auth.js          passwords and login tokens
 src/mailer.js        ticket and refund emails
 public/              pages: browse, event, ticket, organizer dashboard, scanner
 seed.js, seed-images demo data
-tests/               17 automated tests (database, payments, refunds, search, pictures, rate limits, email)
+tests/               23 automated tests (database, payments, refunds and requests, search, pictures, rate limits, email)
 scripts/             send-test-email.js (checks your email settings)
 docs/                architecture and schema diagrams (SVG)
 ```

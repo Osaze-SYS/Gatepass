@@ -13,8 +13,8 @@
   document.title = ev.title + ' · Gatepass';
   const pol = ev.refundPolicy;
   const policy = pol.open
-    ? (pol.cutoffHours === 0 ? 'Free refunds until the event starts.' : `Free refunds until ${fmtDate(pol.closesAt)} (${pol.cutoffHours} hours before the event).`)
-    : 'Self-service refunds have closed for this event. Contact the organizer for help.';
+    ? (pol.cutoffHours === 0 ? 'Free instant refunds until the event starts.' : `Free instant refunds until ${fmtDate(pol.closesAt)} (${pol.cutoffHours} hours before the event). After that you can send the organizer a request.`)
+    : (new Date(ev.starts_at) < new Date() ? 'This event has started, so refunds are closed. Contact the organizer for help.' : 'Instant refunds have closed. You can still send the organizer a refund request until the event starts.');
   const started = new Date(ev.starts_at) < new Date();
 
   page.innerHTML = `

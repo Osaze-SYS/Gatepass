@@ -5,7 +5,7 @@ const db = require('./src/db');
 const payments = require('./src/payments');
 const { hashPassword, verifyPassword, issueToken, requireAuth } = require('./src/auth');
 const { signCode, parseCode, qrDataUrl } = require('./src/tickets');
-const { createOrder, expirePendingOrders, fulfillOrder, refundOrder, refundWindow, httpError } = require('./src/orders');
+const { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, refundWindow, httpError } = require('./src/orders');
 const { buyerFeePerTicket } = require('./src/fees');
 const { parseImage } = require('./src/images');
 const { makeLimiters } = require('./src/ratelimit');
@@ -155,7 +155,14 @@ function createApp(opts = {}) {
       out.tickets = await Promise.all(rows.map(async (t) => ({ code: signCode(t.id), qr: await qrDataUrl(signCode(t.id)), checkedIn: Boolean(t.checked_in_at) })));
       const w = refundWindow(info.starts_at, info.refund_cutoff_hours);
       const anyUsed = out.tickets.some((t) => t.checkedIn);
-      out.refund = { available: w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours, reason: anyUsed ? 'used' : w.open ? '' : 'closed' };
+      const started = new Date(info.starts_at) <= new Date();
+      const request = (await db.query('SELECT status, decline_note, created_at FROM refund_requests WHERE order_id = $1', [order.id])).rows[0] || null;
+      out.refund = {
+        available: w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours,
+        canRequest: !w.open && !anyUsed && !started && !request,      // after the cutoff the buyer can ask the organizer
+        request,
+        reason: anyUsed ? 'used' : w.open ? '' : started ? 'started' : 'closed',
+      };
     }
     res.json(out);
   }));
@@ -171,6 +178,12 @@ function createApp(opts = {}) {
     if (!refundWindow(row.starts_at, row.refund_cutoff_hours).open) throw httpError(403, `Self-service refunds closed ${row.refund_cutoff_hours} hours before the event. Please contact the organizer.`);
     const out = await refundOrder({ reference: row.reference, initiatedBy: 'buyer', reason: str(req.body.reason, 300) });
     res.json({ ok: true, ...out });
+  }));
+
+  // After the instant-refund cutoff the buyer sends a request; the organizer decides.
+  app.post('/api/orders/:reference/refund-request', limit.refund, wrap(async (req, res) => {
+    await requestRefund({ reference: str(req.params.reference, 60), email: str(req.body.email).toLowerCase(), reason: str(req.body.reason, 300) });
+    res.status(201).json({ ok: true });
   }));
 
   // Paystack calls this after every payment. We trust only the signature, then
@@ -256,6 +269,10 @@ function createApp(opts = {}) {
                 COALESCE(SUM(o.amount_kobo) FILTER (WHERE o.status = 'refunded'), 0) AS refunded,
                 COUNT(*) FILTER (WHERE o.status IN ('refund_due', 'refund_pending')) AS needs_attention
          FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id WHERE t.event_id = $1`, [e.id])).rows[0];
+      const waiting = (await db.query(
+        `SELECT COUNT(*) AS n FROM refund_requests rr JOIN orders o ON o.id = rr.order_id JOIN ticket_types t ON t.id = o.ticket_type_id
+         WHERE t.event_id = $1 AND rr.status = 'pending' AND o.status = 'paid'`, [e.id])).rows[0].n;
+      e.totals.needs_attention = Number(e.totals.needs_attention) + Number(waiting);   // waiting requests also need a decision
       e.images = (await db.query('SELECT id FROM event_images WHERE event_id = $1 ORDER BY position, id', [e.id])).rows.map((r) => r.id);
     }));
     res.json(events);
@@ -267,10 +284,11 @@ function createApp(opts = {}) {
     const { rows } = await db.query(
       `SELECT o.reference, o.buyer_name, o.buyer_email, t.name AS ticket_name, o.quantity, o.amount_kobo, o.fee_kobo, o.payout_kobo,
               o.status, o.paid_at, o.refunded_at,
-              (SELECT COUNT(*) FROM tickets k WHERE k.order_id = o.id AND k.checked_in_at IS NOT NULL) AS used
-       FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id
+              (SELECT COUNT(*) FROM tickets k WHERE k.order_id = o.id AND k.checked_in_at IS NOT NULL) AS used,
+              rr.status AS request_status, rr.reason AS request_reason, rr.decline_note AS request_note, rr.created_at AS requested_at
+       FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id LEFT JOIN refund_requests rr ON rr.order_id = o.id
        WHERE t.event_id = $1 AND o.status IN ('paid', 'refund_due', 'refund_pending', 'refunded')
-       ORDER BY COALESCE(o.paid_at, o.created_at) DESC LIMIT 500`, [eventId]);
+       ORDER BY COALESCE(rr.status = 'pending', false) DESC, COALESCE(o.paid_at, o.created_at) DESC LIMIT 500`, [eventId]);
     res.json(rows);
   }));
 
@@ -280,6 +298,12 @@ function createApp(opts = {}) {
        WHERE o.reference = $1 AND e.organizer_id = $2`, [str(req.params.reference, 60), req.userId])).rows[0];
     if (!row) throw httpError(404, 'Order not found.');
     const out = await refundOrder({ reference: row.reference, initiatedBy: 'organizer', reason: str(req.body.reason, 300) });
+    res.json({ ok: true, ...out });
+  }));
+
+  // Approve or decline a buyer's refund request (organizers only, for their own events).
+  app.post('/api/organizer/orders/:reference/refund-request/decide', requireAuth, limit.refund, wrap(async (req, res) => {
+    const out = await decideRefundRequest({ reference: str(req.params.reference, 60), organizerId: req.userId, action: str(req.body.action, 10), note: str(req.body.note, 300) });
     res.json({ ok: true, ...out });
   }));
 

@@ -45,3 +45,20 @@ test('a rejected email raises a clear error', async () => {
   reply = { ok: false, status: 400, body: { message: 'sender email is invalid' } };
   await assert.rejects(() => sendRefundEmail({ to: 'a@b.co', name: 'A', eventTitle: 'E', amountKobo: 100 }), /Brevo rejected the email \(HTTP 400\): sender email is invalid/);
 });
+
+test('refund request email goes to the organizer with the buyer details escaped', async () => {
+  const { sendRefundRequestEmail } = require('../src/mailer');
+  await sendRefundRequestEmail({ to: 'org@test.dev', organizerName: 'Org', buyerName: 'Ada <b>', buyerEmail: 'ada@test.dev', eventTitle: 'Tech Night', ticketName: 'VIP', quantity: 2, amountKobo: 800000, reason: '<img src=x>', dashboardUrl: 'https://gatepass.example/organizer.html' });
+  const { body } = calls[0];
+  assert.strictEqual(body.to[0].email, 'org@test.dev');
+  assert.strictEqual(body.subject, 'Refund request for Tech Night');
+  assert.ok(body.htmlContent.includes('₦8,000') && body.htmlContent.includes('https://gatepass.example/organizer.html'));
+  assert.ok(!body.htmlContent.includes('<img src=x>') && !body.htmlContent.includes('Ada <b>'), 'user text must be escaped');
+});
+
+test('declined email tells the buyer their tickets are still valid', async () => {
+  const { sendRefundDeclinedEmail } = require('../src/mailer');
+  await sendRefundDeclinedEmail({ to: 'ada@test.dev', name: 'Ada', eventTitle: 'Tech Night', note: 'Please transfer the ticket' });
+  assert.strictEqual(calls[0].body.subject, 'About your refund request for Tech Night');
+  assert.ok(calls[0].body.htmlContent.includes('still valid') && calls[0].body.htmlContent.includes('Please transfer the ticket'));
+});

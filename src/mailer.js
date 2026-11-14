@@ -80,6 +80,25 @@ async function sendRefundEmail({ to, name, eventTitle, amountKobo }) {
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Refund notice for ${to}`);
 }
 
+async function sendRefundRequestEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, reason, dashboardUrl }) {
+  await send({
+    to, toName: organizerName,
+    subject: `Refund request for ${eventTitle}`,
+    html: `<p>Hi ${esc(organizerName)},</p><p><b>${esc(buyerName)}</b> (${esc(buyerEmail)}) asked for a refund of <b>${esc('₦' + (amountKobo / 100).toLocaleString('en-NG'))}</b> for ${esc(quantity)} × ${esc(ticketName)} to <b>${esc(eventTitle)}</b>. The instant-refund period has ended, so the decision is yours.</p>
+      <p>Their reason: ${esc(reason || 'No reason given')}</p>${button(dashboardUrl, 'Review the request')}`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Refund request for ${eventTitle} from ${buyerEmail}`);
+}
+
+async function sendRefundDeclinedEmail({ to, name, eventTitle, note }) {
+  await send({
+    to, toName: name,
+    subject: `About your refund request for ${eventTitle}`,
+    html: `<p>Hi ${esc(name)},</p><p>The organizer of <b>${esc(eventTitle)}</b> could not approve your refund request, so your tickets are still valid.</p>${note ? `<p>Their note: ${esc(note)}</p>` : ''}<p>If you have questions, please contact the organizer directly.</p>`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Declined refund notice for ${to}`);
+}
+
 // Used by `npm run test-email` to check your settings.
 async function sendTestEmail(to) {
   await send({
@@ -89,4 +108,4 @@ async function sendTestEmail(to) {
   });
 }
 
-module.exports = { sendTicketEmail, sendRefundEmail, sendTestEmail, mode };
+module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendTestEmail, mode };

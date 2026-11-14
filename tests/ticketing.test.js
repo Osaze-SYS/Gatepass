@@ -189,3 +189,71 @@ test('login attempts are rate limited', async () => {
   tight.close();
   assert.deepStrictEqual(codes, [401, 401, 401, 429, 429]);
 });
+
+// ---------- refund requests (after the instant-refund cutoff) ----------
+const decide = (ref, action, note, auth = token) => api(`/api/organizer/orders/${ref}/refund-request/decide`, { action, note }, auth);
+const request = (ref, i, reason = 'Cannot attend') => api(`/api/orders/${ref}/refund-request`, { email: `buyer${i}@test.dev`, reason });
+
+test('after the cutoff the buyer sends a request and the organizer approves it', async () => {
+  const { eventId, typeId } = await makeEvent({ capacity: 2, priceNaira: 4000, days: 1 });     // starts in 24h, cutoff is 48h
+  const ref = await buyAndPay(typeId, 2, 20);
+  const order = (await api(`/api/orders/${ref}`)).body;
+  assert.strictEqual(order.refund.available, false);
+  assert.strictEqual(order.refund.canRequest, true);
+  assert.strictEqual((await api(`/api/orders/${ref}/refund`, { email: 'buyer20@test.dev' })).status, 403);          // no instant refund any more
+  assert.strictEqual((await api(`/api/orders/${ref}/refund-request`, { email: 'nobody@test.dev' })).status, 404);   // wrong email
+  assert.strictEqual((await request(ref, 20)).status, 201);
+  assert.strictEqual((await request(ref, 20)).status, 409);                                                         // only one request per order
+  const after = (await api(`/api/orders/${ref}`)).body;
+  assert.strictEqual(after.refund.request.status, 'pending');
+  assert.strictEqual(after.refund.canRequest, false);
+  const row = (await api(`/api/organizer/events/${eventId}/orders`, null, token)).body[0];
+  assert.deepStrictEqual([row.request_status, row.request_reason], ['pending', 'Cannot attend']);                  // waiting requests are listed first
+  const totals = (await api('/api/organizer/events', null, token)).body.find((e) => e.id === eventId).totals;
+  assert.strictEqual(totals.needs_attention, 1);
+  assert.strictEqual((await decide(ref, 'approve', '', token2)).status, 404);                                       // other organizers cannot decide
+  assert.strictEqual((await decide(ref, 'maybe')).status, 400);
+  assert.strictEqual((await decide(ref, 'approve')).status, 200);
+  assert.strictEqual((await api(`/api/orders/${ref}`)).body.status, 'refunded');
+  assert.strictEqual((await api(`/api/organizer/events/${eventId}/orders`, null, token)).body[0].request_status, 'approved');
+  assert.strictEqual((await decide(ref, 'approve')).status, 409);                                                   // already handled
+  assert.strictEqual((await buy(typeId, 2, 90)).status, 201);                                                       // the stock came back
+});
+
+test('declining keeps the tickets valid and the buyer cannot ask again', async () => {
+  const { typeId } = await makeEvent({ capacity: 5, priceNaira: 4000, days: 1 });
+  const ref = await buyAndPay(typeId, 1, 21);
+  assert.strictEqual((await request(ref, 21)).status, 201);
+  assert.strictEqual((await decide(ref, 'decline', 'Please transfer the ticket instead')).status, 200);
+  const order = (await api(`/api/orders/${ref}`)).body;
+  assert.strictEqual(order.status, 'paid');
+  assert.deepStrictEqual([order.refund.request.status, order.refund.request.decline_note], ['declined', 'Please transfer the ticket instead']);
+  assert.strictEqual(order.refund.canRequest, false);
+  assert.strictEqual((await request(ref, 21)).status, 409);
+  assert.strictEqual((await decide(ref, 'approve')).status, 409);
+  assert.strictEqual((await api('/api/checkin', { code: order.tickets[0].code }, token)).body.result, 'valid');       // still works at the gate
+});
+
+test('requests are refused before the cutoff, after the event starts, and once tickets are used', async () => {
+  const early = await makeEvent({ capacity: 5, priceNaira: 4000, days: 10 });
+  const r1 = await buyAndPay(early.typeId, 1, 22);
+  assert.strictEqual((await request(r1, 22)).status, 409);                       // still inside the instant-refund window
+  const started = await makeEvent({ capacity: 5, priceNaira: 4000, days: -1 });
+  const r2 = await buyAndPay(started.typeId, 1, 23);
+  assert.strictEqual((await api(`/api/orders/${r2}`)).body.refund.reason, 'started');
+  assert.strictEqual((await request(r2, 23)).status, 403);
+  const used = await makeEvent({ capacity: 5, priceNaira: 4000, days: 1 });
+  const r3 = await buyAndPay(used.typeId, 2, 24);
+  await api('/api/checkin', { code: (await api(`/api/orders/${r3}`)).body.tickets[0].code }, token);
+  assert.strictEqual((await request(r3, 24)).status, 409);
+});
+
+test('an organizer refund also settles a waiting request', async () => {
+  const { eventId, typeId } = await makeEvent({ capacity: 5, priceNaira: 4000, days: 1 });
+  const ref = await buyAndPay(typeId, 1, 25);
+  await request(ref, 25);
+  assert.strictEqual((await api(`/api/organizer/orders/${ref}/refund`, {}, token)).status, 200);
+  const row = (await api(`/api/organizer/events/${eventId}/orders`, null, token)).body.find((o) => o.reference === ref);
+  assert.strictEqual(row.request_status, 'approved');
+  assert.strictEqual((await decide(ref, 'decline')).status, 409);
+});

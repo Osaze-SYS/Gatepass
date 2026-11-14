@@ -27,12 +27,26 @@ async function load() {
   if (o.status === 'refund_pending') return message('Your refund is being processed', 'The tickets for this order no longer work. The money is on its way back to you.');
   if (o.status === 'refunded') return message('This order was refunded', `We returned ${nairaZero(o.amount_kobo)}. Banks can take a few days to show it.`, '<p><a class="btn" href="/">Browse events</a></p>');
 
-  const refundBlock = o.refund.available
-    ? `<details class="card flat no-print"><summary>Need to cancel? Request a refund</summary>
-        <p class="muted small" style="margin-top:.8rem">Free until ${esc(fmtDate(o.refund.closesAt))}. Your tickets stop working once the refund is made.</p>
+  const r = o.refund;
+  let refundBlock;
+  if (r.available) {
+    refundBlock = `<details class="card flat no-print"><summary>Need to cancel? Get an instant refund</summary>
+        <p class="muted small" style="margin-top:.8rem">Free until ${esc(fmtDate(r.closesAt))}. Your tickets stop working once the refund is made.</p>
         <div class="field"><label for="remail">Email used at checkout</label><input id="remail" type="email" autocomplete="email"></div>
-        <div id="rmsg" role="alert"></div><button class="btn danger outline" id="refund">Refund this order</button></details>`
-    : `<p class="muted small no-print">${o.refund.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : `Self-service refunds closed ${o.refund.cutoffHours} hours before the event. Contact the organizer if you need help.`}</p>`;
+        <div id="rmsg" role="alert"></div><button class="btn danger outline" id="refund">Refund this order</button></details>`;
+  } else if (r.request) {
+    refundBlock = r.request.status === 'pending'
+      ? `<div class="notice info no-print"><b>Refund request sent.</b> The organizer will review it and you will get an email with their decision. Your tickets stay valid until then.</div>`
+      : `<div class="notice warn no-print"><b>The organizer could not approve your refund request.</b>${r.request.decline_note ? ' Their note: ' + esc(r.request.decline_note) : ''} Your tickets are still valid.</div>`;
+  } else if (r.canRequest) {
+    refundBlock = `<details class="card flat no-print"><summary>Can't make it? Ask the organizer for a refund</summary>
+        <p class="muted small" style="margin-top:.8rem">Instant refunds closed ${r.cutoffHours} hours before the event. You can still send the organizer a request and they will decide. Your tickets keep working until a refund is approved.</p>
+        <div class="field"><label for="qemail">Email used at checkout</label><input id="qemail" type="email" autocomplete="email"></div>
+        <div class="field"><label for="qreason">Why do you need a refund? (optional)</label><textarea id="qreason" maxlength="300" rows="3"></textarea></div>
+        <div id="qmsg" role="alert"></div><button class="btn" id="send-request">Send refund request</button></details>`;
+  } else {
+    refundBlock = `<p class="muted small no-print">${r.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : 'This event has already started, so refunds are closed. Contact the organizer if you need help.'}</p>`;
+  }
 
   page.innerHTML = `
     <div class="card banner" style="margin-bottom:1.4rem"><div class="thumb">${cover(o.cover_image_id, '', o.title)}</div>
@@ -61,6 +75,15 @@ async function load() {
     if (!ok) return;
     try { await api(`/api/orders/${encodeURIComponent(o.reference)}/refund`, { email }); toast('Refund started. Check your email.'); load(); }
     catch (err) { rmsg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; }
+  });
+
+  document.querySelector('#send-request')?.addEventListener('click', async (e) => {
+    const email = document.querySelector('#qemail').value.trim(), reason = document.querySelector('#qreason').value.trim();
+    const qmsg = document.querySelector('#qmsg');
+    if (!email) { qmsg.innerHTML = '<p class="notice err">Enter the email you used at checkout.</p>'; return; }
+    e.target.disabled = true;
+    try { await api(`/api/orders/${encodeURIComponent(o.reference)}/refund-request`, { email, reason }); toast('Request sent. The organizer will reply by email.'); load(); }
+    catch (err) { qmsg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; e.target.disabled = false; }
   });
 }
 ref ? load() : message('No order found', 'This link is missing an order reference.', '<p><a class="btn" href="/">Browse events</a></p>');

@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS refunds (
   reason TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- After the instant-refund cutoff a buyer can ask the organizer. One request per order.
+CREATE TABLE IF NOT EXISTS refund_requests (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','declined')),
+  decline_note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  decided_at TIMESTAMPTZ
+);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(starts_at);
 CREATE INDEX IF NOT EXISTS idx_images_event ON event_images(event_id, position);
 CREATE INDEX IF NOT EXISTS idx_types_event ON ticket_types(event_id);
