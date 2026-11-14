@@ -45,8 +45,14 @@ async function load() {
         <div class="field"><label for="qreason">Why do you need a refund? (optional)</label><textarea id="qreason" maxlength="300" rows="3"></textarea></div>
         <div id="qmsg" role="alert"></div><button class="btn" id="send-request">Send refund request</button></details>`;
   } else {
-    refundBlock = `<p class="muted small no-print">${r.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : 'This event has already started, so refunds are closed. Contact the organizer if you need help.'}</p>`;
+    refundBlock = `<p class="muted small no-print">${r.reason === 'none' ? 'This event has a no-refund policy. All sales are final.' : r.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : 'This event has already started, so refunds are closed. Contact the organizer if you need help.'}</p>`;
   }
+
+  const shareUrl = `${location.origin}/event.html?id=${o.event_id}`;
+  const shareText = `I'm going to ${o.title}! Get your ticket here:`;
+  const shareBlock = `<div class="card flat no-print" style="margin:0 0 1.4rem"><h3>Invite your friends</h3><p class="muted small">Share this link so they can get their tickets too.</p>
+      <div class="row" style="flex-wrap:nowrap"><input id="share-link" readonly value="${esc(shareUrl)}" aria-label="Event link"><button class="btn" id="copy-link" style="flex:none">Copy link</button></div>
+      <div class="row" style="margin-top:.7rem"><a class="btn secondary sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(shareText + ' ' + shareUrl)}">Share on WhatsApp</a>${navigator.share ? '<button class="btn secondary sm" id="native-share">More ways to share</button>' : ''}</div></div>`;
 
   page.innerHTML = `
     <div class="card banner" style="margin-bottom:1.4rem"><div class="thumb">${cover(o.cover_image_id, '', o.title)}</div>
@@ -65,7 +71,14 @@ async function load() {
         ${o.fee_kobo && o.amount_kobo > o.subtotal_kobo ? `<div class="muted"><span>Service fee</span><span>${nairaZero(o.fee_kobo)}</span></div>` : ''}
         <div class="total"><span>Total paid</span><span>${naira(o.amount_kobo)}</span></div></div>
       <p class="muted small" style="margin:.8rem 0 0">Order reference: ${esc(o.reference)}</p></div>
+    ${shareBlock}
     ${refundBlock}`;
+
+  document.querySelector('#copy-link')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(shareUrl); } catch (e) { const f = document.querySelector('#share-link'); f.select(); document.execCommand('copy'); }
+    toast('Link copied. Share it anywhere.');
+  });
+  document.querySelector('#native-share')?.addEventListener('click', () => navigator.share({ title: o.title, text: shareText, url: shareUrl }).catch(() => {}));
 
   document.querySelector('#refund')?.addEventListener('click', async () => {
     const email = document.querySelector('#remail').value.trim();

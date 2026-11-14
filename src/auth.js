@@ -17,17 +17,20 @@ function verifyPassword(password, stored) {
 }
 
 // ---- Login tokens: base64url(payload).signature ----
-function issueToken(userId) {
-  const payload = b64(JSON.stringify({ uid: userId, exp: Date.now() + 7 * 864e5 }));
+// purpose 's' = login session, 'v' = email confirmation link. A token only works for its own purpose.
+// "Remember me" keeps a session for 30 days; otherwise it lasts one day (and the browser forgets it when closed).
+function issueToken(userId, remember = false, purpose = 's', ttlMs) {
+  const ttl = ttlMs || (remember ? 30 * 864e5 : 864e5);
+  const payload = b64(JSON.stringify({ uid: userId, exp: Date.now() + ttl, p: purpose }));
   return `${payload}.${hmac(payload)}`;
 }
-function readToken(token) {
+function readToken(token, purpose = 's') {
   const [payload, sig] = (token || '').split('.');
   if (!payload || !sig) return null;
   const expected = hmac(payload);
   if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
-  return data.exp > Date.now() ? data : null;
+  return data.exp > Date.now() && (data.p || 's') === purpose ? data : null;
 }
 
 function requireAuth(req, res, next) {
@@ -38,4 +41,4 @@ function requireAuth(req, res, next) {
   next();
 }
 
-module.exports = { hashPassword, verifyPassword, issueToken, requireAuth, hmac };
+module.exports = { hashPassword, verifyPassword, issueToken, readToken, requireAuth, hmac };

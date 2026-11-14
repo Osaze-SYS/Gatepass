@@ -15,6 +15,11 @@ Built as a portfolio project to show a complete, realistic system: accounts, pay
 - **Checkout:** pay with Paystack (or the practice checkout), tickets held for 15 minutes, free events skip payment.
 - **Platform fee:** a percentage (and optional flat amount) per paid ticket, paid by the buyer on top or deducted from the organizer.
 - **Tickets:** signed QR codes on a ticket page (printable) and by email.
+- **Manage events:** organizers can edit an event after publishing (details, date, refund policy, ticket prices and numbers, add or remove ticket types) and delete it; a changed date or venue is emailed to everyone who bought tickets.
+- **Refund policy per event:** instant refunds until a cutoff, or "No refunds, all sales are final".
+- **Accounts:** organizers confirm their email through a link (with a pop-up after sign-up), and the login page has "Remember me".
+- **Emails:** buyers get their tickets and an event link to share; organizers get an email for every sale, refund request and granted refund; buyers hear about refunds and declined requests.
+- **Sharing:** the ticket page has a share box (copy link, WhatsApp, device share), and shared event links show a proper preview with the event's title and picture.
 - **Refunds:** buyers refund themselves instantly until a cutoff the organizer sets; after the cutoff they send a request that the organizer approves or declines (the organizer is emailed, and so is the buyer if it is declined); organizers can refund any order at any time; used tickets cannot be refunded.
 - **Gate scanner:** camera or typed code, rejects forged, repeated and refunded tickets.
 - **Dashboard:** earnings, fees, refunds, sales per ticket type, attendee and order lists.
@@ -29,7 +34,7 @@ npm install
 cp .env.example .env        # Windows: copy .env.example .env   then set APP_SECRET
 npm run seed                # demo organizer + 4 events with pictures
 npm start                   # http://localhost:3000
-npm test                    # 23 automated tests
+npm test                    # 33 automated tests
 ```
 
 Demo organizer: `demo@gatepass.dev` / `password123`.
@@ -43,7 +48,7 @@ Set `DATABASE_URL` in `.env`. Tables are created automatically on first start.
 - **Free hosted database:** create a project on Neon or Supabase and paste the connection string.
 - **Local with Docker:** run `docker compose up -d`, then set `DATABASE_URL=postgres://gatepass:gatepass@localhost:5432/gatepass`.
 
-If your host needs SSL and the string does not say so, set `DATABASE_SSL=true`. The same 13 tests pass on both PGlite and a real PostgreSQL server; to run them against your own server set `TEST_DATABASE_URL` (use an empty test database).
+If your host needs SSL and the string does not say so, set `DATABASE_SSL=true`. The whole test suite passes on both PGlite and a real PostgreSQL server. To run it against your own server, use an empty test database and run `TEST_DATABASE_URL=postgres://... node --test --test-concurrency=1`.
 
 ### Real Paystack test payments and refunds
 
@@ -85,6 +90,10 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 **Refund requests.** Instant refunds stop at the organizer's cutoff. After that, and until the event starts, the buyer (who must give the email used at checkout) can send one request per order. It appears at the top of the organizer's orders list, and the organizer is emailed. Approving runs the same three-step refund as above; declining leaves the tickets valid and emails the buyer the organizer's note. Any other refund of the same order, such as the organizer refunding directly, settles the waiting request automatically.
 
+**Editing and deleting events.** Editing keeps each ticket type's id, so earlier orders stay linked and keep the price they were bought at. The number of tickets cannot go below what is sold or held, and a ticket type that has orders cannot be removed. Deleting hides the event instead of erasing it, so sales and refund history stay intact; an upcoming event with live orders must have them refunded first.
+
+**Email confirmation and "Remember me".** With an email service set up, a new organizer account cannot log in until the emailed link is used (the link is a signed, single-purpose token that expires after 48 hours and cannot be used as a login). Without an email service, accounts work straight away so local testing needs no setup. "Remember me" keeps the login for 30 days in the browser's long-term storage; without it the login lasts one day and is forgotten when the browser closes.
+
 **Platform fee.** Per ticket: `round(price x percent) + flat`. Each order stores the subtotal, fee, amount charged and organizer payout, so reports never have to recompute history when rates change. With `FEE_PAYER=buyer` the fee is added on top; with `organizer` it is deducted from the payout.
 
 **Pictures in the database.** Stored as `BYTEA`, so they survive hosts with temporary disks. The browser shrinks photos to at most 1600 px wide before upload; the server checks the real file signature (not just the declared type), limits the size, and serves them with long cache headers.
@@ -101,7 +110,8 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/auth/register`, `/api/auth/login` | Accounts |
+| POST | `/api/auth/register`, `/api/auth/login` | Accounts (login accepts `remember`) |
+| POST | `/api/auth/verify`, `/api/auth/resend` | Confirm an email address, send the link again |
 | GET | `/api/events?q=&category=&when=&price=&sort=` | Search and browse |
 | GET | `/api/events/:id`, `/api/images/:id` | Event detail, pictures |
 | POST | `/api/checkout` | Reserve tickets and start payment |
@@ -110,6 +120,7 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | POST | `/api/orders/:reference/refund-request` | Buyer asks the organizer after the cutoff |
 | POST | `/api/webhooks/paystack` | Signed payment confirmation |
 | POST | `/api/organizer/events` | Create event with ticket types (auth) |
+| PUT, DELETE | `/api/organizer/events/:id` | Edit or delete an event (auth) |
 | POST, DELETE | `/api/organizer/events/:id/images[/:imageId]` | Add, remove pictures (auth) |
 | POST | `/api/organizer/events/:id/images/:imageId/cover` | Make a picture the cover (auth) |
 | GET | `/api/organizer/events` | Earnings, fees, refunds, sales (auth) |
@@ -147,9 +158,9 @@ src/images.js        picture validation
 src/ratelimit.js     rate limiters
 src/auth.js          passwords and login tokens
 src/mailer.js        ticket and refund emails
-public/              pages: browse, event, ticket, organizer dashboard, scanner
+public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation
 seed.js, seed-images demo data
-tests/               23 automated tests (database, payments, refunds and requests, search, pictures, rate limits, email)
+tests/               33 automated tests (database, payments, refunds and requests, editing, deleting, search, pictures, rate limits, email, account confirmation)
 scripts/             send-test-email.js (checks your email settings)
 docs/                architecture and schema diagrams (SVG)
 ```

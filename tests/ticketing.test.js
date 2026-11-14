@@ -257,3 +257,81 @@ test('an organizer refund also settles a waiting request', async () => {
   assert.strictEqual(row.request_status, 'approved');
   assert.strictEqual((await decide(ref, 'decline')).status, 409);
 });
+
+// ---------- no-refund events ----------
+test('a no-refund event blocks buyer refunds and requests, but the organizer can still refund', async () => {
+  const res = await api('/api/organizer/events', { title: 'Final Sale Show', venue: 'Hall', category: 'Music', startsAt: inDays(10), refundsAllowed: false, ticketTypes: [{ name: 'Regular', priceNaira: 3000, capacity: 5 }] }, token);
+  assert.strictEqual(res.status, 201);
+  const event = (await api(`/api/events/${res.body.id}`)).body;
+  assert.deepStrictEqual([event.refundsAllowed, event.refundPolicy.allowed], [false, false]);
+  const ref = await buyAndPay(event.ticketTypes[0].id, 1, 30);
+  const order = (await api(`/api/orders/${ref}`)).body;
+  assert.deepStrictEqual([order.refund.available, order.refund.canRequest, order.refund.reason], [false, false, 'none']);
+  assert.strictEqual((await api(`/api/orders/${ref}/refund`, { email: 'buyer30@test.dev' })).status, 403);
+  assert.strictEqual((await api(`/api/orders/${ref}/refund-request`, { email: 'buyer30@test.dev' })).status, 403);
+  assert.strictEqual((await api(`/api/organizer/orders/${ref}/refund`, {}, token)).status, 200);
+});
+
+// ---------- editing events ----------
+test('organizers can edit an event, its ticket types and its refund policy', async () => {
+  const { eventId, typeId } = await makeEvent({ capacity: 5, priceNaira: 1000, title: 'Editable Event' });
+  const ref = await buyAndPay(typeId, 2, 31);                                                   // 2 tickets sold
+  const put = (types, extra = {}, auth = token) => api(`/api/organizer/events/${eventId}`, {
+    title: 'Edited Title', venue: 'New Venue', category: 'Music', startsAt: inDays(12), description: 'Updated text',
+    refundsAllowed: false, refundCutoffHours: 24, ticketTypes: types, ...extra }, auth, 'PUT');
+  const regular = (o = {}) => ({ id: typeId, name: 'Regular Plus', priceNaira: 1500, capacity: 20, ...o });
+
+  assert.strictEqual((await put([regular()], {}, token2)).status, 404);                          // not your event
+  assert.strictEqual((await put([regular({ capacity: 1 })])).status, 409);                       // below the 2 already sold
+  assert.strictEqual((await put([{ name: 'Only new', priceNaira: 100, capacity: 5 }])).status, 409);   // would remove a type that has orders
+  assert.strictEqual((await put([regular()], { title: '' })).status, 400);
+  assert.strictEqual((await put([regular({ id: 999999 })])).status, 400);                        // type from somewhere else
+
+  const ok = await put([regular(), { name: 'VIP', priceNaira: 9000, capacity: 3 }]);
+  assert.strictEqual(ok.status, 200);
+  assert.strictEqual(ok.body.notified, 1);                                                       // date and venue changed, one buyer told
+  const ev = (await api(`/api/events/${eventId}`)).body;
+  assert.deepStrictEqual([ev.title, ev.venue, ev.category, ev.description, ev.refundsAllowed], ['Edited Title', 'New Venue', 'Music', 'Updated text', false]);
+  assert.deepStrictEqual(ev.ticketTypes.map((t) => [t.name, t.price_kobo, t.remaining]), [['Regular Plus', 150000, 18], ['VIP', 900000, 3]]);
+  assert.strictEqual((await api(`/api/orders/${ref}`)).body.subtotal_kobo, 200000);              // the earlier order keeps the price it was bought at
+
+  const trimmed = await put([regular()], { startsAt: ev.starts_at, venue: 'New Venue' });         // drop the unused VIP type, nothing else changes
+  assert.strictEqual(trimmed.status, 200);
+  assert.strictEqual(trimmed.body.notified, 0);
+  assert.strictEqual((await api(`/api/events/${eventId}`)).body.ticketTypes.length, 1);
+});
+
+// ---------- deleting events ----------
+test('deleting an event hides it, and live orders must be refunded first', async () => {
+  const { eventId, typeId } = await makeEvent({ capacity: 5, priceNaira: 1000, title: 'Doomed Event' });
+  const ref = await buyAndPay(typeId, 1, 32);
+  const del = (id, auth = token) => api(`/api/organizer/events/${id}`, null, auth, 'DELETE');
+  assert.strictEqual((await del(eventId, token2)).status, 404);
+  assert.strictEqual((await del(eventId)).status, 409);                                          // still has a paid order
+  assert.strictEqual((await api(`/api/organizer/orders/${ref}/refund`, {}, token)).status, 200);
+  assert.strictEqual((await del(eventId)).status, 200);
+  assert.strictEqual((await api(`/api/events/${eventId}`)).status, 404);
+  assert.deepStrictEqual((await api('/api/events?q=Doomed')).body, []);
+  assert.ok(!(await api('/api/organizer/events', null, token)).body.some((e) => e.id === eventId));
+  assert.strictEqual((await buy(typeId, 1, 33)).status, 404);                                    // can no longer be bought
+  assert.strictEqual((await api(`/api/orders/${ref}`)).body.status, 'refunded');                 // the buyer's history is kept
+  assert.strictEqual((await api(`/api/organizer/events/${eventId}`, { title: 'x' }, token, 'PUT')).status, 404);
+});
+
+test('an event that is long over can be deleted even though it had sales', async () => {
+  const { eventId, typeId } = await makeEvent({ capacity: 5, priceNaira: 1000, days: -3, title: 'Old Event' });
+  await buyAndPay(typeId, 1, 34);
+  assert.strictEqual((await api(`/api/organizer/events/${eventId}`, null, token, 'DELETE')).status, 200);
+});
+
+// ---------- share previews ----------
+test('shared event links carry a preview with the event details (escaped)', async () => {
+  const res = await api('/api/organizer/events', { title: 'Preview <Night> & "Show"', venue: 'Hall', category: 'Music', startsAt: inDays(5), description: 'Great night', ticketTypes: [{ name: 'Regular', priceNaira: 100, capacity: 5 }] }, token);
+  await api(`/api/organizer/events/${res.body.id}/images`, { image: PNG }, token);
+  const html = await (await fetch(`${base}/event.html?id=${res.body.id}`)).text();
+  assert.ok(html.includes('<meta property="og:title" content="Preview &lt;Night&gt; &amp; &quot;Show&quot;">'));
+  assert.ok(html.includes('<title>Preview &lt;Night&gt; &amp; &quot;Show&quot; · Gatepass</title>'));
+  assert.ok(/property="og:image" content="[^"]+\/api\/images\/\d+"/.test(html));
+  const generic = await (await fetch(`${base}/event.html?id=999999`)).text();
+  assert.ok(generic.includes('<title>Event · Gatepass</title>') && !generic.includes('og:title'));
+});

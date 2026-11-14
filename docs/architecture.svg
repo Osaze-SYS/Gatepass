@@ -17,7 +17,7 @@
     <text x="435" y="268" font-size="12">payments.js: Paystack or mock</text>
     <text x="435" y="288" font-size="12">mailer.js: ticket and refund emails</text><text x="435" y="308" font-size="12">fees, images, rate limiting</text>
     <text x="735" y="92" font-weight="bold">Paystack</text><text x="735" y="112" font-size="12">payment page, webhook</text>
-    <text x="735" y="202" font-weight="bold">Email (SMTP)</text><text x="735" y="222" font-size="12">tickets with QR images</text>
+    <text x="735" y="202" font-weight="bold">Email (Brevo or SMTP)</text><text x="735" y="222" font-size="12">tickets, sales, refunds</text>
     <text x="735" y="322" font-weight="bold">PostgreSQL database</text><text x="735" y="342" font-size="12">users, events, pictures,</text><text x="735" y="360" font-size="12">ticket types, orders,</text><text x="735" y="378" font-size="12">tickets, refunds</text>
   </g>
   <g stroke="#000" stroke-width="2" fill="none" marker-end="url(#a)">

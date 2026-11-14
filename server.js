@@ -1,11 +1,13 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const config = require('./src/config');
 const db = require('./src/db');
 const payments = require('./src/payments');
-const { hashPassword, verifyPassword, issueToken, requireAuth } = require('./src/auth');
+const { hashPassword, verifyPassword, issueToken, readToken, requireAuth } = require('./src/auth');
+const mailer = require('./src/mailer');
 const { signCode, parseCode, qrDataUrl } = require('./src/tickets');
-const { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, refundWindow, httpError } = require('./src/orders');
+const { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, notifyBuyersOfEventChange, refundWindow, httpError } = require('./src/orders');
 const { buyerFeePerTicket } = require('./src/fees');
 const { parseImage } = require('./src/images');
 const { makeLimiters } = require('./src/ratelimit');
@@ -15,6 +17,25 @@ const CATEGORIES = ['Music', 'Tech', 'Business', 'Faith', 'Sports', 'Education',
 const str = (v, max = 200) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const intId = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 1 || n > 2147483647) throw httpError(404, 'Not found.'); return n; };
+
+const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const verifyUrl = (userId) => `${config.baseUrl}/verify.html?token=${encodeURIComponent(issueToken(userId, false, 'v', 2 * 864e5))}`;
+
+// Shared by "create event" and "edit event": reads and checks everything the organizer typed.
+function parseEventBody(body) {
+  const title = str(body.title, 120), venue = str(body.venue, 160), description = str(body.description, 3000);
+  const category = CATEGORIES.includes(body.category) ? body.category : 'Other';
+  const refundsAllowed = !(body.refundsAllowed === false || body.refundsAllowed === 'false');
+  const cutoff = body.refundCutoffHours === undefined || body.refundCutoffHours === '' ? 48 : Number(body.refundCutoffHours);
+  const startsAt = new Date(body.startsAt);
+  const types = Array.isArray(body.ticketTypes) ? body.ticketTypes : [];
+  if (!title || !venue || isNaN(startsAt)) throw httpError(400, 'Enter a title, venue and a valid date and time.');
+  if (!Number.isInteger(cutoff) || cutoff < 0 || cutoff > 720) throw httpError(400, 'Refund cutoff must be between 0 and 720 hours.');
+  if (!types.length || types.length > 8) throw httpError(400, 'Add between 1 and 8 ticket types.');
+  const clean = types.map((t) => ({ id: t.id === undefined || t.id === null ? null : Number(t.id), name: str(t.name, 60), price: Math.round(Number(t.priceNaira) * 100), capacity: Number(t.capacity) }));
+  if (clean.some((t) => (t.id !== null && !Number.isInteger(t.id)) || !t.name || !(t.price >= 0) || t.price > 2000000000 || !Number.isInteger(t.capacity) || t.capacity < 1 || t.capacity > 1000000)) throw httpError(400, 'Each ticket type needs a name, a price (0 or more) and a whole-number capacity.');
+  return { title, venue, description, category, refundsAllowed, cutoff, startsAt, types: clean };
+}
 
 const COVER = '(SELECT i.id FROM event_images i WHERE i.event_id = e.id ORDER BY i.position, i.id LIMIT 1)';
 
@@ -31,10 +52,28 @@ function createApp(opts = {}) {
   // Keep the raw body: Paystack's webhook signature is computed over the exact bytes sent.
   app.use(express.json({ limit: '100kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
   app.use('/api', limit.api);
+  // Event pages get the event's own title, text and picture in their <head>, so a shared link shows a proper preview in WhatsApp, Facebook and so on.
+  const eventPage = fs.readFileSync(path.join(__dirname, 'public', 'event.html'), 'utf8');
+  app.get('/event.html', wrap(async (req, res) => {
+    let html = eventPage;
+    const id = Number(req.query.id);
+    if (Number.isInteger(id) && id > 0 && id <= 2147483647) {
+      const ev = (await db.query(`SELECT e.title, e.description, e.venue, e.starts_at, ${COVER} AS cover FROM events e WHERE e.id = $1 AND e.deleted_at IS NULL`, [id])).rows[0];
+      if (ev) {
+        const when = new Date(ev.starts_at).toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' });
+        const text = `${when} · ${ev.venue}. ${ev.description || 'Get your tickets on Gatepass.'}`.replace(/\s+/g, ' ').slice(0, 200);
+        const tags = [['og:type', 'website'], ['og:site_name', 'Gatepass'], ['og:title', ev.title], ['og:description', text], ['og:url', `${config.baseUrl}/event.html?id=${id}`],
+          ...(ev.cover ? [['og:image', `${config.baseUrl}/api/images/${ev.cover}`]] : []), ['twitter:card', ev.cover ? 'summary_large_image' : 'summary']]
+          .map(([k, v]) => `<meta property="${k}" content="${escHtml(v)}">`).join('') + `<meta name="description" content="${escHtml(text)}">`;
+        html = html.replace('<title>Event · Gatepass</title>', `<title>${escHtml(ev.title)} · Gatepass</title>`).replace('</head>', tags + '</head>');
+      }
+    }
+    res.type('html').send(html);
+  }));
   app.use(express.static(path.join(__dirname, 'public')));
 
   const ownEvent = async (eventId, userId) => {
-    const row = (await db.query('SELECT id FROM events WHERE id = $1 AND organizer_id = $2', [intId(eventId), userId])).rows[0];
+    const row = (await db.query('SELECT id FROM events WHERE id = $1 AND organizer_id = $2 AND deleted_at IS NULL', [intId(eventId), userId])).rows[0];
     if (!row) throw httpError(404, 'Event not found.');
     return row.id;
   };
@@ -45,24 +84,53 @@ function createApp(opts = {}) {
   }));
 
   // ---------------- Accounts ----------------
+  // With an email service set up, new accounts must confirm their email before they can log in.
+  // Without one (local testing) there is no way to send the link, so accounts are active straight away.
   app.post('/api/auth/register', limit.auth, wrap(async (req, res) => {
     const name = str(req.body.name, 80), email = str(req.body.email).toLowerCase(), password = str(req.body.password, 200);
     if (!name || !EMAIL.test(email) || password.length < 8) throw httpError(400, 'Enter your name, a valid email and a password of at least 8 characters.');
     if ((await db.query('SELECT 1 FROM users WHERE email = $1', [email])).rows.length) throw httpError(409, 'An account with this email already exists. Try logging in.');
-    const { rows } = await db.query('INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id', [name, email, hashPassword(password)]);
-    res.status(201).json({ token: issueToken(rows[0].id), name });
+    const needsConfirm = mailer.mode !== 'console';
+    const { rows } = await db.query('INSERT INTO users (name, email, password_hash, email_verified) VALUES ($1, $2, $3, $4) RETURNING id', [name, email, hashPassword(password), !needsConfirm]);
+    const userId = rows[0].id;
+    if (!needsConfirm) return res.status(201).json({ token: issueToken(userId, false), name });
+    try {
+      await mailer.sendVerificationEmail({ to: email, name, url: verifyUrl(userId) });
+    } catch (err) {
+      await db.query('DELETE FROM users WHERE id = $1', [userId]);       // do not leave an account nobody can confirm
+      console.error('[mail] failed:', err.message);
+      throw httpError(502, 'We could not send the confirmation email. Check the address and try again.');
+    }
+    res.status(201).json({ needsVerification: true, email });
   }));
 
   app.post('/api/auth/login', limit.auth, wrap(async (req, res) => {
     const user = (await db.query('SELECT * FROM users WHERE email = $1', [str(req.body.email).toLowerCase()])).rows[0];
     if (!user || !verifyPassword(str(req.body.password, 200), user.password_hash)) throw httpError(401, 'Email or password is incorrect.');
-    res.json({ token: issueToken(user.id), name: user.name });
+    if (!user.email_verified) return res.status(403).json({ error: 'Please confirm your email first. We sent you a link when you signed up.', needsVerification: true, email: user.email });
+    res.json({ token: issueToken(user.id, req.body.remember === true), name: user.name });   // "remember me" = 30 days, otherwise 1 day
+  }));
+
+  // Always answers the same way, so nobody can use this to find out which emails have accounts.
+  app.post('/api/auth/resend', limit.auth, wrap(async (req, res) => {
+    const user = (await db.query('SELECT id, name, email, email_verified FROM users WHERE email = $1', [str(req.body.email).toLowerCase()])).rows[0];
+    if (user && !user.email_verified && mailer.mode !== 'console') {
+      try { await mailer.sendVerificationEmail({ to: user.email, name: user.name, url: verifyUrl(user.id) }); } catch (err) { console.error('[mail] failed:', err.message); }
+    }
+    res.json({ ok: true });
+  }));
+
+  app.post('/api/auth/verify', limit.auth, wrap(async (req, res) => {
+    const data = readToken(str(req.body.token, 800), 'v');
+    if (!data) throw httpError(400, 'This link is invalid or has expired. Log in to get a new confirmation email.');
+    await db.query('UPDATE users SET email_verified = TRUE WHERE id = $1', [data.uid]);
+    res.json({ ok: true });
   }));
 
   // ---------------- Browse and search ----------------
   // Filters: q (text), category, when (week|month), price (free|paid), sort (date|price|newest)
   app.get('/api/events', wrap(async (req, res) => {
-    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'"], having = [], params = [];
+    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'", 'e.deleted_at IS NULL'], having = [], params = [];
     const add = (v) => { params.push(v); return '$' + params.length; };
     const q = str(req.query.q, 80);
     if (q) {
@@ -88,14 +156,15 @@ function createApp(opts = {}) {
   app.get('/api/events/:id', wrap(async (req, res) => {
     await expirePendingOrders();
     const id = intId(req.params.id);
-    const event = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours FROM events WHERE id = $1', [id])).rows[0];
+    const event = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed FROM events WHERE id = $1 AND deleted_at IS NULL', [id])).rows[0];
     if (!event) throw httpError(404, 'Event not found.');
     const types = (await db.query('SELECT id, name, price_kobo, capacity - sold AS remaining FROM ticket_types WHERE event_id = $1 ORDER BY price_kobo, id', [id])).rows;
     event.ticketTypes = types.map((t) => ({ ...t, fee_kobo: buyerFeePerTicket(t.price_kobo) }));
     event.images = (await db.query('SELECT id FROM event_images WHERE event_id = $1 ORDER BY position, id', [id])).rows.map((r) => r.id);
     event.feePayer = config.feePayer;
     const w = refundWindow(event.starts_at, event.refund_cutoff_hours);
-    event.refundPolicy = { cutoffHours: event.refund_cutoff_hours, closesAt: w.closesAt, open: w.open };
+    event.refundsAllowed = event.refunds_allowed;
+    event.refundPolicy = { allowed: event.refunds_allowed, cutoffHours: event.refund_cutoff_hours, closesAt: w.closesAt, open: event.refunds_allowed && w.open };
     res.json(event);
   }));
 
@@ -143,7 +212,7 @@ function createApp(opts = {}) {
       order = await find();
     }
     const info = (await db.query(
-      `SELECT e.id AS event_id, e.title, e.venue, e.starts_at, e.refund_cutoff_hours, t.name AS ticket_name, ${COVER} AS cover_image_id
+      `SELECT e.id AS event_id, e.title, e.venue, e.starts_at, e.refund_cutoff_hours, e.refunds_allowed, t.name AS ticket_name, ${COVER} AS cover_image_id
        FROM ticket_types t JOIN events e ON e.id = t.event_id WHERE t.id = $1`, [order.ticket_type_id])).rows[0];
     const out = {
       reference: order.reference, status: order.status, quantity: order.quantity, buyer_name: order.buyer_name,
@@ -158,10 +227,11 @@ function createApp(opts = {}) {
       const started = new Date(info.starts_at) <= new Date();
       const request = (await db.query('SELECT status, decline_note, created_at FROM refund_requests WHERE order_id = $1', [order.id])).rows[0] || null;
       out.refund = {
-        available: w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours,
-        canRequest: !w.open && !anyUsed && !started && !request,      // after the cutoff the buyer can ask the organizer
+        allowed: info.refunds_allowed,
+        available: info.refunds_allowed && w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours,
+        canRequest: info.refunds_allowed && !w.open && !anyUsed && !started && !request,      // after the cutoff the buyer can ask the organizer
         request,
-        reason: anyUsed ? 'used' : w.open ? '' : started ? 'started' : 'closed',
+        reason: !info.refunds_allowed ? 'none' : anyUsed ? 'used' : w.open ? '' : started ? 'started' : 'closed',
       };
     }
     res.json(out);
@@ -171,10 +241,11 @@ function createApp(opts = {}) {
   // and only works until the event's refund cutoff.
   app.post('/api/orders/:reference/refund', limit.refund, wrap(async (req, res) => {
     const row = (await db.query(
-      `SELECT o.reference, o.buyer_email, e.starts_at, e.refund_cutoff_hours
+      `SELECT o.reference, o.buyer_email, e.starts_at, e.refund_cutoff_hours, e.refunds_allowed
        FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id WHERE o.reference = $1`,
       [str(req.params.reference, 60)])).rows[0];
     if (!row || row.buyer_email !== str(req.body.email).toLowerCase()) throw httpError(404, 'We could not find an order with that email address.');
+    if (!row.refunds_allowed) throw httpError(403, 'This event does not offer refunds. All sales are final.');
     if (!refundWindow(row.starts_at, row.refund_cutoff_hours).open) throw httpError(403, `Self-service refunds closed ${row.refund_cutoff_hours} hours before the event. Please contact the organizer.`);
     const out = await refundOrder({ reference: row.reference, initiatedBy: 'buyer', reason: str(req.body.reason, 300) });
     res.json({ ok: true, ...out });
@@ -206,23 +277,61 @@ function createApp(opts = {}) {
 
   // ---------------- Organizer ----------------
   app.post('/api/organizer/events', requireAuth, wrap(async (req, res) => {
-    const title = str(req.body.title, 120), venue = str(req.body.venue, 160), description = str(req.body.description, 3000);
-    const category = CATEGORIES.includes(req.body.category) ? req.body.category : 'Other';
-    const cutoff = req.body.refundCutoffHours === undefined || req.body.refundCutoffHours === '' ? 48 : Number(req.body.refundCutoffHours);
-    const startsAt = new Date(req.body.startsAt);
-    const types = Array.isArray(req.body.ticketTypes) ? req.body.ticketTypes : [];
-    if (!title || !venue || isNaN(startsAt)) throw httpError(400, 'Enter a title, venue and a valid date and time.');
-    if (!Number.isInteger(cutoff) || cutoff < 0 || cutoff > 720) throw httpError(400, 'Refund cutoff must be between 0 and 720 hours.');
-    if (!types.length || types.length > 8) throw httpError(400, 'Add between 1 and 8 ticket types.');
-    const clean = types.map((t) => ({ name: str(t.name, 60), price: Math.round(Number(t.priceNaira) * 100), capacity: Number(t.capacity) }));
-    if (clean.some((t) => !t.name || !(t.price >= 0) || t.price > 2000000000 || !Number.isInteger(t.capacity) || t.capacity < 1 || t.capacity > 1000000)) throw httpError(400, 'Each ticket type needs a name, a price (0 or more) and a whole-number capacity.');
+    const p = parseEventBody(req.body);
     const id = await db.tx(async (q) => {
-      const ev = await q('INSERT INTO events (organizer_id, title, description, venue, category, starts_at, refund_cutoff_hours) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-        [req.userId, title, description, venue, category, startsAt, cutoff]);
-      for (const t of clean) await q('INSERT INTO ticket_types (event_id, name, price_kobo, capacity) VALUES ($1, $2, $3, $4)', [ev.rows[0].id, t.name, t.price, t.capacity]);
+      const ev = await q('INSERT INTO events (organizer_id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+        [req.userId, p.title, p.description, p.venue, p.category, p.startsAt, p.cutoff, p.refundsAllowed]);
+      for (const t of p.types) await q('INSERT INTO ticket_types (event_id, name, price_kobo, capacity) VALUES ($1, $2, $3, $4)', [ev.rows[0].id, t.name, t.price, t.capacity]);
       return ev.rows[0].id;
     });
     res.status(201).json({ id });
+  }));
+
+  // Edit an event. Ticket types that already exist keep their id so past orders stay linked to them.
+  app.put('/api/organizer/events/:id', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    const p = parseEventBody(req.body);
+    const changed = await db.tx(async (q) => {
+      const ev = (await q('SELECT venue, starts_at FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0];
+      if (!ev) throw httpError(404, 'Event not found.');
+      const existing = (await q('SELECT t.id, t.name, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS orders FROM ticket_types t WHERE t.event_id = $1 FOR UPDATE', [id])).rows;
+      const byId = new Map(existing.map((t) => [t.id, t]));
+      const keep = new Set();
+      for (const t of p.types) {
+        if (t.id === null) continue;
+        const cur = byId.get(t.id);
+        if (!cur) throw httpError(400, 'One of the ticket types does not belong to this event.');
+        if (t.capacity < cur.sold) throw httpError(409, `"${cur.name}": ${cur.sold} tickets are already sold or held, so the number of tickets cannot go below that.`);
+        keep.add(t.id);
+      }
+      for (const cur of existing) {
+        if (keep.has(cur.id)) continue;
+        if (cur.orders > 0) throw httpError(409, `"${cur.name}" already has orders, so it cannot be removed. Lower its number of tickets to the amount already sold instead.`);
+        await q('DELETE FROM ticket_types WHERE id = $1', [cur.id]);
+      }
+      for (const t of p.types) {
+        if (t.id !== null) await q('UPDATE ticket_types SET name = $2, price_kobo = $3, capacity = $4 WHERE id = $1', [t.id, t.name, t.price, t.capacity]);
+        else await q('INSERT INTO ticket_types (event_id, name, price_kobo, capacity) VALUES ($1, $2, $3, $4)', [id, t.name, t.price, t.capacity]);
+      }
+      await q('UPDATE events SET title = $2, venue = $3, description = $4, category = $5, starts_at = $6, refund_cutoff_hours = $7, refunds_allowed = $8 WHERE id = $1',
+        [id, p.title, p.venue, p.description, p.category, p.startsAt, p.cutoff, p.refundsAllowed]);
+      return new Date(ev.starts_at).getTime() !== p.startsAt.getTime() || ev.venue !== p.venue;
+    });
+    const notified = changed ? await notifyBuyersOfEventChange(id) : 0;      // a new date or venue is emailed to everyone holding tickets
+    res.json({ ok: true, notified });
+  }));
+
+  // Delete an event. It is hidden rather than erased, so sales and refund history stay intact.
+  // An upcoming event with live orders must have them refunded first.
+  app.delete('/api/organizer/events/:id', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    await expirePendingOrders();
+    const n = (await db.query(
+      `SELECT COUNT(*) AS n FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id
+       WHERE e.id = $1 AND e.starts_at > NOW() - INTERVAL '1 day' AND o.status IN ('paid', 'pending', 'refund_due', 'refund_pending')`, [id])).rows[0].n;
+    if (n > 0) throw httpError(409, `This event still has ${n} active ${n === 1 ? 'order' : 'orders'}. Refund them from Orders and refunds first, then you can delete it.`);
+    await db.query('UPDATE events SET deleted_at = NOW() WHERE id = $1', [id]);
+    res.json({ ok: true });
   }));
 
   // Pictures for an event's ticket page. The first picture is the cover.
@@ -255,10 +364,10 @@ function createApp(opts = {}) {
 
   app.get('/api/organizer/events', requireAuth, wrap(async (req, res) => {
     await expirePendingOrders();
-    const events = (await db.query('SELECT id, title, venue, category, starts_at, refund_cutoff_hours FROM events WHERE organizer_id = $1 ORDER BY starts_at DESC', [req.userId])).rows;
+    const events = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed FROM events WHERE organizer_id = $1 AND deleted_at IS NULL ORDER BY starts_at DESC', [req.userId])).rows;
     await Promise.all(events.map(async (e) => {
       e.ticketTypes = (await db.query(
-        `SELECT t.id, t.name, t.price_kobo, t.capacity,
+        `SELECT t.id, t.name, t.price_kobo, t.capacity, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS order_count,
                 (SELECT COUNT(*) FROM tickets k WHERE k.ticket_type_id = t.id AND k.voided_at IS NULL) AS issued,
                 (SELECT COUNT(*) FROM tickets k WHERE k.ticket_type_id = t.id AND k.voided_at IS NULL AND k.checked_in_at IS NOT NULL) AS checked_in
          FROM ticket_types t WHERE t.event_id = $1 ORDER BY t.price_kobo, t.id`, [e.id])).rows;

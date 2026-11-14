@@ -49,9 +49,10 @@ async function send(msg) {
   await transport.sendMail({ from: config.mail.from, to: msg.to, subject: msg.subject, html: msg.html, attachments: msg.attachments });
 }
 
+const money = (kobo) => (kobo === 0 ? 'Free' : '₦' + (kobo / 100).toLocaleString('en-NG'));
 const button = (url, label) => `<p><a href="${esc(url)}" style="display:inline-block;background:#1d4ed8;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:bold">${esc(label)}</a></p>`;
 
-async function sendTicketEmail({ to, name, eventTitle, venue, startsAt, ticketName, tickets, ticketUrl }) {
+async function sendTicketEmail({ to, name, eventTitle, venue, startsAt, ticketName, tickets, ticketUrl, eventUrl }) {
   const inline = mode !== 'brevo-api';        // inline pictures work over SMTP; the API route attaches them instead
   const attachments = [];
   for (const [i, t] of tickets.entries()) {
@@ -64,7 +65,7 @@ async function sendTicketEmail({ to, name, eventTitle, venue, startsAt, ticketNa
   await send({
     to, toName: name,
     subject: `Your tickets for ${eventTitle}`,
-    html: `<p>Hi ${esc(name)},</p><p>You're going to <b>${esc(eventTitle)}</b> at ${esc(venue)} on ${esc(when)}.</p>${ticketUrl ? button(ticketUrl, 'View your tickets online') : ''}${blocks}<p>Show each QR code at the gate. Each one works once.</p>`,
+    html: `<p>Hi ${esc(name)},</p><p>You're going to <b>${esc(eventTitle)}</b> at ${esc(venue)} on ${esc(when)}.</p>${ticketUrl ? button(ticketUrl, 'View your tickets online') : ''}${blocks}<p>Show each QR code at the gate. Each one works once.</p>${eventUrl ? `<p>Going with friends? Share the event: <a href="${esc(eventUrl)}">${esc(eventUrl)}</a></p>` : ''}`,
     attachments,
   });
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). ${tickets.length} ticket(s) for ${to}${ticketUrl ? ': ' + ticketUrl : ''}`);
@@ -99,6 +100,45 @@ async function sendRefundDeclinedEmail({ to, name, eventTitle, note }) {
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Declined refund notice for ${to}`);
 }
 
+async function sendVerificationEmail({ to, name, url }) {
+  await send({
+    to, toName: name,
+    subject: 'Confirm your email for Gatepass',
+    html: `<p>Hi ${esc(name)},</p><p>Welcome to Gatepass! Please confirm your email address to activate your organizer account.</p>${button(url, 'Confirm my email')}<p>This link works for 48 hours. If you did not create an account, you can ignore this email.</p>`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Confirmation link for ${to}: ${url}`);
+}
+
+async function sendSaleEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, payoutKobo, remaining, dashboardUrl }) {
+  await send({
+    to, toName: organizerName,
+    subject: `New sale: ${quantity} × ${ticketName} for ${eventTitle}`,
+    html: `<p>Hi ${esc(organizerName)},</p><p><b>${esc(buyerName)}</b> (${esc(buyerEmail)}) just bought <b>${esc(quantity)} × ${esc(ticketName)}</b> for <b>${esc(eventTitle)}</b>.</p>
+      <p>Paid: ${esc(money(amountKobo))}<br>You earn: ${esc(money(payoutKobo))}<br>Tickets left in this type: ${esc(remaining)}</p>${button(dashboardUrl, 'View your orders')}`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Sale notice for ${eventTitle} from ${buyerEmail}`);
+}
+
+async function sendRefundOrganizerEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, via, dashboardUrl }) {
+  const how = via === 'request' ? 'You approved the refund request from' : 'A refund was granted automatically (instant refund period) to';
+  await send({
+    to, toName: organizerName,
+    subject: `Refund granted for ${eventTitle}`,
+    html: `<p>Hi ${esc(organizerName)},</p><p>${esc(how)} <b>${esc(buyerName)}</b> (${esc(buyerEmail)}): <b>${esc(money(amountKobo))}</b> for ${esc(quantity)} × ${esc(ticketName)} to <b>${esc(eventTitle)}</b>. Their tickets no longer work and the places are back on sale.</p>${button(dashboardUrl, 'View your orders')}`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Refund notice to organizer for ${eventTitle}`);
+}
+
+async function sendEventUpdateEmail({ to, name, eventTitle, venue, startsAt, ticketUrl }) {
+  const when = new Date(startsAt).toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' });
+  await send({
+    to, toName: name,
+    subject: `Update for ${eventTitle}`,
+    html: `<p>Hi ${esc(name)},</p><p>The organizer updated the details of <b>${esc(eventTitle)}</b>. Here is the latest:</p><p><b>When:</b> ${esc(when)}<br><b>Where:</b> ${esc(venue)}</p><p>Your tickets are still valid.</p>${ticketUrl ? button(ticketUrl, 'View your tickets') : ''}`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Event update for ${to}`);
+}
+
 // Used by `npm run test-email` to check your settings.
 async function sendTestEmail(to) {
   await send({
@@ -108,4 +148,4 @@ async function sendTestEmail(to) {
   });
 }
 
-module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendTestEmail, mode };
+module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendVerificationEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail, sendTestEmail, mode };

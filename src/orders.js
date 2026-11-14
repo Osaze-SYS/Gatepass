@@ -4,7 +4,7 @@ const config = require('./config');
 const payments = require('./payments');
 const { breakdown } = require('./fees');
 const { newTicket, signCode } = require('./tickets');
-const { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail } = require('./mailer');
+const { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail } = require('./mailer');
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -32,8 +32,8 @@ async function expirePendingOrders() {
 // Creates a pending order and holds the tickets. Throws a 409 when sold out.
 async function createOrder({ ticketTypeId, quantity, buyerName, buyerEmail }) {
   return db.tx(async (q) => {
-    const type = (await q('SELECT id, price_kobo FROM ticket_types WHERE id = $1', [ticketTypeId])).rows[0];
-    if (!type) throw httpError(404, 'That ticket type does not exist.');
+    const type = (await q('SELECT t.id, t.price_kobo FROM ticket_types t JOIN events e ON e.id = t.event_id WHERE t.id = $1 AND e.deleted_at IS NULL', [ticketTypeId])).rows[0];
+    if (!type) throw httpError(404, 'That ticket is no longer available.');
     if (!(await q(RESERVE, [quantity, ticketTypeId])).rows.length) throw httpError(409, 'Not enough tickets left. Try a smaller quantity.');
     const b = breakdown(type.price_kobo, quantity);
     const reference = 'gp_' + crypto.randomBytes(8).toString('hex');
@@ -79,19 +79,47 @@ async function fulfillOrder(reference, paidKobo) {
   if (result.state === 'issued') {
     // Email outside the transaction: a mail failure must never undo a paid order.
     sendOrderEmail(reference).catch((err) => console.error('[mail] failed:', err.message));
+    notifyOrganizerOfSale(reference).catch((err) => console.error('[mail] failed:', err.message));
   }
   return result;
 }
 
 async function sendOrderEmail(reference) {
   const { rows } = await db.query(
-    `SELECT o.id, o.buyer_name, o.buyer_email, e.title, e.venue, e.starts_at, t.name AS ticket_name
+    `SELECT o.id, o.buyer_name, o.buyer_email, e.id AS event_id, e.title, e.venue, e.starts_at, t.name AS ticket_name
      FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id
      WHERE o.reference = $1`, [reference]);
   const row = rows[0];
   const tickets = (await db.query('SELECT id FROM tickets WHERE order_id = $1 ORDER BY id', [row.id])).rows.map((t) => ({ code: signCode(t.id) }));
   await sendTicketEmail({ to: row.buyer_email, name: row.buyer_name, eventTitle: row.title, venue: row.venue, startsAt: row.starts_at, ticketName: row.ticket_name, tickets,
-    ticketUrl: `${config.baseUrl}/ticket.html?reference=${encodeURIComponent(reference)}` });
+    ticketUrl: `${config.baseUrl}/ticket.html?reference=${encodeURIComponent(reference)}`, eventUrl: `${config.baseUrl}/event.html?id=${row.event_id}` });
+}
+
+// The organizer gets an email for every sale.
+async function notifyOrganizerOfSale(reference) {
+  const row = (await db.query(
+    `SELECT o.buyer_name, o.buyer_email, o.quantity, o.amount_kobo, o.payout_kobo, t.name AS ticket_name, t.capacity - t.sold AS remaining,
+            e.title, u.email AS organizer_email, u.name AS organizer_name
+     FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id JOIN users u ON u.id = e.organizer_id
+     WHERE o.reference = $1`, [reference])).rows[0];
+  await sendSaleEmail({ to: row.organizer_email, organizerName: row.organizer_name, buyerName: row.buyer_name, buyerEmail: row.buyer_email, eventTitle: row.title,
+    ticketName: row.ticket_name, quantity: row.quantity, amountKobo: row.amount_kobo, payoutKobo: row.payout_kobo, remaining: row.remaining, dashboardUrl: `${config.baseUrl}/organizer.html` });
+}
+
+// After the organizer changes the date or venue, everyone holding tickets is told. Returns how many people will be emailed.
+async function notifyBuyersOfEventChange(eventId) {
+  const ev = (await db.query('SELECT title, venue, starts_at FROM events WHERE id = $1', [eventId])).rows[0];
+  const buyers = (await db.query(
+    `SELECT DISTINCT ON (o.buyer_email) o.buyer_email, o.buyer_name, o.reference
+     FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id
+     WHERE t.event_id = $1 AND o.status = 'paid' ORDER BY o.buyer_email, o.paid_at DESC`, [eventId])).rows;
+  (async () => {
+    for (const b of buyers) {
+      try { await sendEventUpdateEmail({ to: b.buyer_email, name: b.buyer_name, eventTitle: ev.title, venue: ev.venue, startsAt: ev.starts_at, ticketUrl: `${config.baseUrl}/ticket.html?reference=${encodeURIComponent(b.reference)}` }); }
+      catch (err) { console.error('[mail] failed:', err.message); }
+    }
+  })();
+  return buyers.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +129,7 @@ async function sendOrderEmail(reference) {
 //   3. on success mark it 'refunded' and return the stock; on failure undo step 1
 // An order stuck in 'refund_pending' (e.g. the server crashed) can simply be retried.
 // ---------------------------------------------------------------------------
-async function refundOrder({ reference, initiatedBy, reason = '' }) {
+async function refundOrder({ reference, initiatedBy, reason = '', via }) {
   const claim = await db.tx(async (q) => {
     const order = (await q('SELECT * FROM orders WHERE reference = $1 FOR UPDATE', [reference])).rows[0];
     if (!order) throw httpError(404, 'Order not found.');
@@ -136,8 +164,16 @@ async function refundOrder({ reference, initiatedBy, reason = '' }) {
     await q("UPDATE refund_requests SET status = 'approved', decided_at = NOW() WHERE order_id = $1 AND status = 'pending'", [claim.id]);
   });
 
-  sendRefundEmail({ to: claim.buyer_email, name: claim.buyer_name, amountKobo: claim.amount_kobo, eventTitle: (await db.query('SELECT e.title FROM ticket_types t JOIN events e ON e.id = t.event_id WHERE t.id = $1', [claim.ticket_type_id])).rows[0].title })
-    .catch((err) => console.error('[mail] failed:', err.message));
+  // Emails: the buyer always hears about it; the organizer too when the buyer's own request or instant refund triggered it.
+  const ctx = (await db.query(
+    `SELECT e.title, t.name AS ticket_name, u.email AS organizer_email, u.name AS organizer_name
+     FROM ticket_types t JOIN events e ON e.id = t.event_id JOIN users u ON u.id = e.organizer_id WHERE t.id = $1`, [claim.ticket_type_id])).rows[0];
+  const log = (err) => console.error('[mail] failed:', err.message);
+  sendRefundEmail({ to: claim.buyer_email, name: claim.buyer_name, amountKobo: claim.amount_kobo, eventTitle: ctx.title }).catch(log);
+  if (initiatedBy === 'buyer') {
+    sendRefundOrganizerEmail({ to: ctx.organizer_email, organizerName: ctx.organizer_name, buyerName: claim.buyer_name, buyerEmail: claim.buyer_email, eventTitle: ctx.title,
+      ticketName: ctx.ticket_name, quantity: claim.quantity, amountKobo: claim.amount_kobo, via: via || 'instant', dashboardUrl: `${config.baseUrl}/organizer.html` }).catch(log);
+  }
   return { amount_kobo: claim.amount_kobo };
 }
 
@@ -147,12 +183,13 @@ async function refundOrder({ reference, initiatedBy, reason = '' }) {
 async function requestRefund({ reference, email, reason }) {
   const order = (await db.query(
     `SELECT o.id, o.status, o.buyer_name, o.buyer_email, o.quantity, o.amount_kobo, t.name AS ticket_name,
-            e.title, e.starts_at, e.refund_cutoff_hours, u.email AS organizer_email, u.name AS organizer_name
+            e.title, e.starts_at, e.refund_cutoff_hours, e.refunds_allowed, u.email AS organizer_email, u.name AS organizer_name
      FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id JOIN users u ON u.id = e.organizer_id
      WHERE o.reference = $1`, [reference])).rows[0];
   if (!order || order.buyer_email !== email) throw httpError(404, 'We could not find an order with that email address.');
   if (order.status === 'refunded') throw httpError(409, 'This order was already refunded.');
   if (order.status !== 'paid') throw httpError(409, 'This order cannot be refunded.');
+  if (!order.refunds_allowed) throw httpError(403, 'This event does not offer refunds. All sales are final.');
   if (refundWindow(order.starts_at, order.refund_cutoff_hours).open) throw httpError(409, 'You can still refund this order yourself, instantly. No request is needed.');
   if (new Date(order.starts_at) <= new Date()) throw httpError(403, 'This event has already started, so refunds are closed. Please contact the organizer directly.');
   const used = (await db.query('SELECT COUNT(*) AS n FROM tickets WHERE order_id = $1 AND checked_in_at IS NOT NULL', [order.id])).rows[0].n;
@@ -174,7 +211,7 @@ async function decideRefundRequest({ reference, organizerId, action, note = '' }
   if (!row) throw httpError(404, 'Refund request not found.');
   if (row.status !== 'pending') throw httpError(409, 'This request was already handled.');
   if (action === 'approve') {
-    await refundOrder({ reference, initiatedBy: 'buyer', reason: 'Approved refund request' });   // also marks the request approved
+    await refundOrder({ reference, initiatedBy: 'buyer', reason: 'Approved refund request', via: 'request' });   // also marks the request approved
     return { result: 'approved' };
   }
   await db.query("UPDATE refund_requests SET status = 'declined', decline_note = $2, decided_at = NOW() WHERE id = $1 AND status = 'pending'", [row.id, String(note).slice(0, 300)]);
@@ -188,4 +225,4 @@ function refundWindow(startsAt, cutoffHours) {
   return { open: Date.now() < closesAt.getTime(), closesAt };
 }
 
-module.exports = { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, refundWindow, httpError };
+module.exports = { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, notifyBuyersOfEventChange, refundWindow, httpError };

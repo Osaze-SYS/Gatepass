@@ -143,6 +143,12 @@ async function init() {
   if (!config.databaseUrl && config.pgliteDir !== 'memory://') require('fs').mkdirSync(config.pgliteDir, { recursive: true });
   impl = await connect();
   await impl.exec(SCHEMA);
+  // Columns added after the first release. IF NOT EXISTS makes this safe on every start, including on a live database.
+  await impl.exec(`
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS refunds_allowed BOOLEAN NOT NULL DEFAULT TRUE;   -- false = "no refunds, all sales are final"
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;                          -- soft delete keeps sales and refund history
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE;     -- existing accounts count as confirmed
+  `);
   return impl;
 }
 

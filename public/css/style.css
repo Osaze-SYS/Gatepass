@@ -189,3 +189,8 @@ details.card summary{cursor:pointer;font-weight:600}
   .ev:nth-child(2){animation-delay:.05s}.ev:nth-child(3){animation-delay:.1s}.ev:nth-child(4){animation-delay:.15s}.ev:nth-child(5){animation-delay:.2s}
   .ev:nth-child(6){animation-delay:.25s}.ev:nth-child(7){animation-delay:.3s}.ev:nth-child(n+8){animation-delay:.35s}
 }
+
+/* ---- login extras, sharing ---- */
+.check{display:flex;align-items:center;gap:.55rem;font-weight:500;margin:0 0 1rem;cursor:pointer}
+.check input{width:auto;margin:0;accent-color:var(--primary)}
+input[readonly]{background:var(--bg)}

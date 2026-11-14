@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Confirm your email · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="max-width:32rem;padding-top:3rem"><div class="card center stack" id="box" aria-live="polite"><p class="muted"><span class="spinner"></span> Confirming your email…</p></div></div></main>
+<script src="/js/common.js"></script>
+<script>
+(async () => {
+  const box = document.querySelector('#box');
+  const token = new URLSearchParams(location.search).get('token');
+  if (!token) { box.innerHTML = '<h1 style="font-size:2rem">This link is incomplete</h1><p class="muted">Open the link from your confirmation email again.</p><a class="btn" href="/organizer.html">Go to login</a>'; return; }
+  try {
+    await api('/api/auth/verify', { token });
+    box.innerHTML = '<span class="badge ok">Email confirmed</span><h1 style="font-size:2rem">You are all set</h1><p class="muted">Your account is active. Log in to start creating events.</p><a class="btn lg" href="/organizer.html">Log in</a>';
+  } catch (e) {
+    box.innerHTML = `<h1 style="font-size:2rem">We could not confirm that link</h1><p class="muted">${esc(e.message)}</p><a class="btn" href="/organizer.html">Go to login</a>`;
+  }
+})();
+</script></body></html>

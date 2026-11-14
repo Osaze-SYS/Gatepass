@@ -4,10 +4,15 @@ const nairaZero = (kobo) => '₦' + (kobo / 100).toLocaleString('en-NG', { maxim
 const fmtDate = (iso) => new Date(iso).toLocaleString('en-NG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 const fmtShort = (iso) => new Date(iso).toLocaleString('en-NG', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const dayParts = (iso) => { const d = new Date(iso); return { day: d.getDate(), mon: d.toLocaleString('en-NG', { month: 'short' }) }; };
-const getToken = () => localStorage.getItem('gp_token');
-const getName = () => localStorage.getItem('gp_name') || '';
-const setSession = (token, name) => { localStorage.setItem('gp_token', token); localStorage.setItem('gp_name', name); };
-const clearSession = () => { localStorage.removeItem('gp_token'); localStorage.removeItem('gp_name'); };
+// "Remember me" keeps the login in localStorage (it survives closing the browser). Without it the login lives in sessionStorage and is forgotten when the browser closes.
+const getToken = () => sessionStorage.getItem('gp_token') || localStorage.getItem('gp_token');
+const getName = () => sessionStorage.getItem('gp_name') || localStorage.getItem('gp_name') || '';
+const setSession = (token, name, remember) => {
+  clearSession();
+  const store = remember ? localStorage : sessionStorage;
+  store.setItem('gp_token', token); store.setItem('gp_name', name);
+};
+const clearSession = () => { for (const s of [localStorage, sessionStorage]) { s.removeItem('gp_token'); s.removeItem('gp_name'); } };
 const CATEGORY_LIST = ['Music', 'Tech', 'Business', 'Faith', 'Sports', 'Education', 'Food & Drink', 'Arts', 'Community', 'Other'];
 
 async function api(path, body, method) {
@@ -15,7 +20,7 @@ async function api(path, body, method) {
   if (getToken()) headers.Authorization = 'Bearer ' + getToken();
   const res = await fetch(path, { method: method || (body ? 'POST' : 'GET'), headers, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) { const e = new Error(data.error || 'Something went wrong. Please try again.'); e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error(data.error || 'Something went wrong. Please try again.'); e.status = res.status; e.data = data; throw e; }
   return data;
 }
 
