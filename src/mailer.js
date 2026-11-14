@@ -29,16 +29,18 @@ function parseFrom(from) {
 // msg: { to, toName, subject, html, attachments: [{ filename, content: Buffer, cid? }] }
 async function send(msg) {
   if (mode === 'brevo-api') {
+    const payload = {
+      sender: parseFrom(config.mail.from),
+      to: [{ email: msg.to, name: msg.toName || undefined }],
+      subject: msg.subject,
+      htmlContent: msg.html,
+    };
+    // Brevo rejects an empty attachment list ("attachment is missing"), so only send the field when there is something to attach.
+    if (msg.attachments && msg.attachments.length) payload.attachment = msg.attachments.map((a) => ({ name: a.filename, content: a.content.toString('base64') }));
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: { 'api-key': config.mail.brevoKey, 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({
-        sender: parseFrom(config.mail.from),
-        to: [{ email: msg.to, name: msg.toName || undefined }],
-        subject: msg.subject,
-        htmlContent: msg.html,
-        attachment: (msg.attachments || []).map((a) => ({ name: a.filename, content: a.content.toString('base64') })),
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

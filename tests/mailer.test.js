@@ -11,7 +11,13 @@ const { newTicket } = require('../src/tickets');
 let calls, reply;
 test.beforeEach(() => {
   calls = []; reply = { ok: true, status: 201, body: { messageId: 'x' } };
-  global.fetch = async (url, opts) => { calls.push({ url, opts, body: JSON.parse(opts.body) }); return { ok: reply.ok, status: reply.status, json: async () => reply.body }; };
+  global.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    // The real Brevo answers 400 "attachment is missing" when the attachment list is present but empty.
+    if (Array.isArray(body.attachment) && body.attachment.length === 0) return { ok: false, status: 400, json: async () => ({ message: 'attachment is missing' }) };
+    calls.push({ url, opts, body });
+    return { ok: reply.ok, status: reply.status, json: async () => reply.body };
+  };
 });
 
 test('uses the Brevo API when a key is set', () => assert.strictEqual(mode, 'brevo-api'));
@@ -38,6 +44,7 @@ test('ticket email: correct request, QR codes attached, link included, names esc
 test('refund email is sent through the same route', async () => {
   await sendRefundEmail({ to: 'ada@test.dev', name: 'Ada', eventTitle: 'Tech Night', amountKobo: 500000 });
   assert.strictEqual(calls[0].body.subject, 'Your refund for Tech Night');
+  assert.ok(!('attachment' in calls[0].body), 'emails without attachments must not send an empty attachment list');
   assert.ok(calls[0].body.htmlContent.includes('₦5,000'));
 });
 

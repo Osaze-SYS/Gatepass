@@ -19,6 +19,7 @@ const sent = [], failFor = new Set();
 global.fetch = async (url, opts) => {
   if (!String(url).startsWith('https://api.brevo.com')) return realFetch(url, opts);
   const body = JSON.parse(opts.body);
+  if (Array.isArray(body.attachment) && body.attachment.length === 0) return { ok: false, status: 400, json: async () => ({ message: 'attachment is missing' }) };   // the real Brevo does this
   if (failFor.has(body.to[0].email)) return { ok: false, status: 400, json: async () => ({ message: 'invalid recipient' }) };
   sent.push({ to: body.to[0].email, subject: body.subject, html: body.htmlContent });
   return { ok: true, status: 201, json: async () => ({}) };
