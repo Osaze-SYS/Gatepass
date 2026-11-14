@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Practice checkout · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="max-width:30rem;padding-top:3rem"><div class="card stack">
+  <span class="badge warn">Practice checkout</span>
+  <h1 style="font-size:2rem">Complete your payment</h1>
+  <p class="muted">No real money moves here. This page stands in for Paystack until you add a Paystack test key to your settings.</p>
+  <div id="msg" role="alert"></div>
+  <button class="btn lg block" id="pay">Simulate a successful payment</button>
+  <a class="btn quiet block" href="/">Cancel and go back</a>
+</div></div></main>
+<script src="/js/common.js"></script>
+<script>
+const reference = new URLSearchParams(location.search).get('reference');
+document.querySelector('#pay').onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = 'Confirming…';
+  try { await api('/api/mock/pay', { reference }); location.href = '/ticket.html?reference=' + encodeURIComponent(reference); }
+  catch (err) { document.querySelector('#msg').innerHTML = `<p class="notice err">${esc(err.message)}</p>`; e.target.disabled = false; e.target.textContent = 'Try again'; }
+};
+</script></body></html>

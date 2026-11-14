@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scan tickets · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="max-width:36rem;padding-top:1.8rem">
+  <h1 class="center" style="font-size:2rem">Scan tickets</h1><p class="muted center">Point the camera at a guest's QR code, or type the code if the camera is not available.</p>
+  <div id="gate" hidden class="card center stack"><h3>Log in first</h3><p class="muted">Only organizers can check guests in.</p><a class="btn" href="/organizer.html">Go to organizer login</a></div>
+  <div id="tool">
+    <div id="reader" class="card" style="padding:.6rem"></div>
+    <form id="manual" class="row" style="align-items:flex-end;margin-top:1rem"><div class="field grow" style="margin:0"><label for="code">Ticket code</label><input id="code" autocomplete="off" placeholder="Paste or type the code"></div><button class="btn">Check</button></form>
+    <div id="result" role="status" aria-live="assertive"></div>
+    <h2 style="margin-top:2rem;font-size:1.15rem">This session</h2><div id="log" class="muted small">No scans yet.</div>
+  </div>
+</div></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="/js/common.js"></script>
+<script>
+if (!getToken()) { document.querySelector('#gate').hidden = false; document.querySelector('#tool').hidden = true; }
+const out = document.querySelector('#result'), logBox = document.querySelector('#log'), log = [];
+let busy = false;
+const tone = { valid: 'valid', already_used: 'warn', refunded: 'bad', invalid: 'bad', wrong_event: 'bad' };
+async function check(code) {
+  if (busy || !code) return; busy = true;
+  try {
+    const r = await api('/api/checkin', { code });
+    out.innerHTML = `<div class="scan-result ${tone[r.result] || 'bad'}">${esc(r.message)}${r.buyer ? `<small>${esc(r.buyer)} · ${esc(r.ticketType)}<br>${esc(r.event)}</small>` : ''}${r.usedAt ? `<small>First scanned ${esc(fmtShort(r.usedAt))}</small>` : ''}</div>`;
+    log.unshift(`${new Date().toLocaleTimeString('en-NG')} · ${esc(r.message)}${r.buyer ? ' · ' + esc(r.buyer) : ''}`);
+    logBox.innerHTML = log.slice(0, 8).map((l) => `<div style="padding:.25rem 0;border-bottom:1px solid var(--line)">${l}</div>`).join('');
+    if (navigator.vibrate) navigator.vibrate(r.result === 'valid' ? 80 : [80, 60, 80]);
+  } catch (e) {
+    if (e.status === 401) { clearSession(); location.reload(); return; }
+    out.innerHTML = `<p class="notice err">${esc(e.message)}</p>`;
+  }
+  setTimeout(() => { busy = false; }, 1500);   // pause so one QR code is not scanned many times
+}
+document.querySelector('#manual').onsubmit = (e) => { e.preventDefault(); check(document.querySelector('#code').value.trim()); document.querySelector('#code').value = ''; };
+if (getToken() && window.Html5QrcodeScanner) new Html5QrcodeScanner('reader', { fps: 10, qrbox: 240 }, false).render((text) => check(text), () => {});
+else if (getToken()) document.querySelector('#reader').innerHTML = '<p class="muted center">The camera scanner could not load. Type the ticket code below.</p>';
+</script></body></html>

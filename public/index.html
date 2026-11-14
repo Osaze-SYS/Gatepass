@@ -1,0 +1,71 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gatepass: find events and buy tickets</title><meta name="description" content="Search events, pay securely and get your QR ticket by email."><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main>
+  <section class="hero"><div class="container rise-kids">
+    <h1>Find events worth showing up for.</h1>
+    <p>Concerts, meetups, festivals and more. Pay in a minute and your QR ticket lands straight in your inbox.</p>
+    <form class="searchbar" id="search" role="search"><label class="sr" for="q">Search events</label>
+      <input id="q" type="search" placeholder="Search by name, venue or type of event" autocomplete="off"><button class="btn">Search</button></form>
+  </div></section>
+
+  <section class="container filters"><div class="card filter-card">
+    <div class="chips grow" id="chips" role="group" aria-label="Categories"></div>
+    <label class="sr" for="when">When</label><select id="when"><option value="">Any date</option><option value="week">This week</option><option value="month">Next 30 days</option></select>
+    <label class="sr" for="price">Price</label><select id="price"><option value="">Free and paid</option><option value="free">Free only</option><option value="paid">Paid only</option></select>
+    <label class="sr" for="sort">Sort</label><select id="sort"><option value="">Soonest first</option><option value="price">Lowest price</option><option value="newest">Newly added</option></select>
+  </div></section>
+
+  <section class="container" style="margin-top:1.8rem">
+    <div class="row spread" style="margin-bottom:1rem"><h2 id="count" aria-live="polite">Upcoming events</h2><button class="btn quiet" id="clear" hidden>Clear filters</button></div>
+    <div id="events" class="grid"></div>
+  </section>
+</main>
+<script src="/js/common.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const state = { q: params.get('q') || '', category: params.get('category') || '', when: params.get('when') || '', price: params.get('price') || '', sort: params.get('sort') || '' };
+const $ = (s) => document.querySelector(s);
+const box = $('#events');
+
+$('#chips').innerHTML = ['All', ...CATEGORY_LIST].map((c) => `<button type="button" class="chip" data-cat="${c === 'All' ? '' : esc(c)}">${esc(c)}</button>`).join('');
+$('#q').value = state.q; $('#when').value = state.when; $('#price').value = state.price; $('#sort').value = state.sort;
+
+const skeleton = () => Array.from({ length: 6 }, () => `<div class="ev skel"><div class="ev-cover"></div><div class="ev-body"><div style="height:4rem;width:100%"></div></div></div>`).join('');
+
+function card(e) {
+  const d = dayParts(e.starts_at);
+  const badge = e.remaining === 0 ? '<span class="badge bad right">Sold out</span>' : e.remaining <= 10 ? `<span class="badge warn right">Only ${e.remaining} left</span>` : e.from_kobo === 0 ? '<span class="badge ok right">Free</span>' : '';
+  return `<a class="ev" href="/event.html?id=${e.id}"><div class="ev-cover">${cover(e.cover_image_id, e.category, e.title)}<span class="badge dark">${esc(e.category)}</span>${badge}</div>
+    <div class="ev-body"><div class="date"><b>${d.day}</b><span>${esc(d.mon)}</span></div>
+    <div style="display:flex;flex-direction:column;flex:1;min-width:0"><h3>${esc(e.title)}</h3><div class="muted small">${esc(e.venue)}<br>${esc(fmtShort(e.starts_at))}</div>
+    <div class="price">${e.from_kobo === 0 ? 'Free' : 'From ' + naira(e.from_kobo)}</div></div></div></a>`;
+}
+
+let timer, seq = 0;
+async function load() {
+  const my = ++seq;
+  const qs = new URLSearchParams(Object.entries(state).filter(([, v]) => v)).toString();
+  history.replaceState(null, '', qs ? '?' + qs : location.pathname);
+  document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.cat === state.category)));
+  const filtered = Object.values(state).some(Boolean);
+  $('#clear').hidden = !filtered;
+  box.innerHTML = skeleton();
+  try {
+    const events = await api('/api/events' + (qs ? '?' + qs : ''));
+    if (my !== seq) return;
+    $('#count').textContent = filtered ? `${events.length} ${events.length === 1 ? 'event' : 'events'} found` : 'Upcoming events';
+    box.innerHTML = events.length ? events.map(card).join('')
+      : `<div class="empty card" style="grid-column:1/-1"><h3>No events match that search</h3><p>Try a different word, or clear the filters to see everything.</p><button class="btn" id="empty-clear">Show all events</button></div>`;
+    $('#empty-clear')?.addEventListener('click', clearAll);
+  } catch (err) { box.innerHTML = `<p class="notice err" style="grid-column:1/-1">${esc(err.message)}</p>`; }
+}
+function clearAll() { Object.keys(state).forEach((k) => (state[k] = '')); $('#q').value = ''; ['when', 'price', 'sort'].forEach((k) => ($('#' + k).value = '')); load(); }
+
+$('#search').addEventListener('submit', (e) => { e.preventDefault(); state.q = $('#q').value.trim(); load(); });
+$('#q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { state.q = $('#q').value.trim(); load(); }, 350); });
+$('#chips').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (b) { state.category = b.dataset.cat; load(); } });
+['when', 'price', 'sort'].forEach((k) => $('#' + k).addEventListener('change', (e) => { state[k] = e.target.value; load(); }));
+$('#clear').addEventListener('click', clearAll);
+load();
+</script></body></html>

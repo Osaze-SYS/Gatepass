@@ -1,0 +1,95 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Event · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="padding-top:1.4rem" id="page"><p class="muted"><span class="spinner"></span> Loading event…</p></div></main>
+<script src="/js/common.js"></script>
+<script>
+(async () => {
+  const page = document.querySelector('#page');
+  const id = new URLSearchParams(location.search).get('id');
+  let ev, meta;
+  try { [ev, meta] = await Promise.all([api('/api/events/' + encodeURIComponent(id)), api('/api/meta')]); }
+  catch (e) { page.innerHTML = `<div class="empty card"><h3>We couldn't find that event</h3><p>${esc(e.message)}</p><a class="btn" href="/">Browse events</a></div>`; return; }
+  document.title = ev.title + ' · Gatepass';
+  const pol = ev.refundPolicy;
+  const policy = pol.open
+    ? (pol.cutoffHours === 0 ? 'Free refunds until the event starts.' : `Free refunds until ${fmtDate(pol.closesAt)} (${pol.cutoffHours} hours before the event).`)
+    : 'Self-service refunds have closed for this event. Contact the organizer for help.';
+  const started = new Date(ev.starts_at) < new Date();
+
+  page.innerHTML = `
+    <p><a href="/" class="small">← All events</a></p>
+    <div class="row" style="margin-bottom:.4rem"><span class="badge">${esc(ev.category)}</span>${started ? '<span class="badge warn">Already started</span>' : ''}</div>
+    <h1>${esc(ev.title)}</h1>
+    <div class="gallery" id="gallery"></div>
+    <div class="layout">
+      <div>
+        <div class="facts">
+          <div class="fact">${ICON.cal}<div><b>${esc(fmtDate(ev.starts_at))}</b></div></div>
+          <div class="fact">${ICON.pin}<div><b>${esc(ev.venue)}</b><div><a class="small" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.venue)}">Open in Maps</a></div></div></div>
+          <div class="fact">${ICON.shield}<div><b>Refund policy</b><div class="muted small">${esc(policy)}</div></div></div>
+        </div>
+        ${ev.description ? `<h2>About this event</h2><p class="desc">${esc(ev.description)}</p>` : ''}
+      </div>
+      <aside class="card buy" aria-label="Buy tickets">
+        <form id="buy" novalidate>
+          <h2>Tickets</h2>
+          <div id="opts">${ev.ticketTypes.map((t, i) => `<label class="opt ${t.remaining ? '' : 'soldout'}"><span><input type="radio" name="type" value="${t.id}" ${t.remaining ? '' : 'disabled'} ${i === (ev.ticketTypes.findIndex((x) => x.remaining)) ? 'checked' : ''}>${esc(t.name)}</span><span class="right">${naira(t.price_kobo)}<br><span class="muted small">${t.remaining ? (t.remaining <= 10 ? 'Only ' + t.remaining + ' left' : 'Available') : 'Sold out'}</span></span></label>`).join('')}</div>
+          <div class="row spread" style="margin:.8rem 0"><span id="qlabel" class="small"><b>How many?</b></span>
+            <div class="stepper" role="group" aria-labelledby="qlabel"><button type="button" id="minus" aria-label="One fewer">−</button><output id="qty" aria-live="polite">1</output><button type="button" id="plus" aria-label="One more">+</button></div></div>
+          <div class="sum" id="sum"></div>
+          <div class="field" style="margin-top:1rem"><label for="name">Your name</label><input id="name" autocomplete="name" required></div>
+          <div class="field"><label for="email">Email for your tickets</label><input id="email" type="email" autocomplete="email" required></div>
+          <div id="msg" role="alert"></div>
+          <button class="btn lg block" id="pay" type="submit"></button>
+          <p class="muted small center" style="margin:.8rem 0 0">${meta.paymentsLive ? 'Secure payment by Paystack.' : 'Test mode: you will use a practice checkout. No real money moves.'}<br>Tickets are held for 15 minutes while you pay.</p>
+        </form>
+      </aside>
+    </div>`;
+
+  // Gallery: cover + thumbnails + full-size view
+  const gal = document.querySelector('#gallery');
+  if (ev.images.length) {
+    let cur = 0;
+    const draw = () => {
+      gal.innerHTML = `<button class="main" type="button" aria-label="View picture larger"><img src="/api/images/${ev.images[cur]}" alt="${esc(ev.title)}"></button>` +
+        (ev.images.length > 1 ? `<div class="thumbs">${ev.images.map((im, i) => `<button type="button" data-i="${i}" aria-label="Show picture ${i + 1}" ${i === cur ? 'aria-current="true"' : ''}><img src="/api/images/${im}" alt=""></button>`).join('')}</div>` : '');
+    };
+    gal.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-i]'); if (t) { cur = Number(t.dataset.i); draw(); return; }
+      if (e.target.closest('.main')) { const d = document.createElement('dialog'); d.className = 'light'; d.innerHTML = `<img src="/api/images/${ev.images[cur]}" alt="${esc(ev.title)}">`; d.addEventListener('click', () => d.close()); d.addEventListener('close', () => d.remove()); document.body.append(d); d.showModal(); }
+    });
+    draw();
+  } else {
+    gal.innerHTML = `<div class="main" style="cursor:default"><div class="ph" style="--h:${(Math.max(0, CATEGORY_LIST.indexOf(ev.category)) * 47 + 215) % 360}"><span>${esc(ev.category)}</span></div></div>`;
+  }
+
+  // Purchase logic
+  const form = document.querySelector('#buy'), btn = document.querySelector('#pay'), msg = document.querySelector('#msg');
+  let qty = 1;
+  const type = () => { const r = form.querySelector('input[name=type]:checked'); return r && ev.ticketTypes.find((t) => t.id === Number(r.value)); };
+  function refresh() {
+    const t = type();
+    if (!t) { document.querySelector('#sum').innerHTML = ''; btn.disabled = true; btn.textContent = 'Sold out'; return; }
+    qty = Math.max(1, Math.min(qty, 10, t.remaining));
+    document.querySelector('#qty').textContent = qty;
+    const sub = t.price_kobo * qty, fee = t.fee_kobo * qty, total = sub + fee;
+    document.querySelector('#sum').innerHTML = `<div><span>${qty} × ${esc(t.name)}</span><span>${naira(sub)}</span></div>` +
+      (fee ? `<div class="muted"><span>Service fee</span><span>${nairaZero(fee)}</span></div>` : '') +
+      `<div class="total"><span>Total</span><span>${naira(total)}</span></div>`;
+    btn.disabled = false;
+    btn.textContent = total === 0 ? 'Get free tickets' : 'Pay ' + nairaZero(total);
+  }
+  document.querySelector('#minus').onclick = () => { qty--; refresh(); };
+  document.querySelector('#plus').onclick = () => { qty++; refresh(); };
+  form.addEventListener('change', refresh); refresh();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault(); msg.innerHTML = '';
+    const name = document.querySelector('#name').value.trim(), email = document.querySelector('#email').value.trim();
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { msg.innerHTML = '<p class="notice err">Enter your name and a valid email so we can send your tickets.</p>'; return; }
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Reserving your tickets…';
+    try { const out = await api('/api/checkout', { ticketTypeId: type().id, quantity: qty, name, email }); location.href = out.url; }
+    catch (err) { msg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; refresh(); }
+  });
+})();
+</script></body></html>
