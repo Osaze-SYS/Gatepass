@@ -73,12 +73,14 @@ async function sendTicketEmail({ to, name, eventTitle, venue, startsAt, ticketNa
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). ${tickets.length} ticket(s) for ${to}${ticketUrl ? ': ' + ticketUrl : ''}`);
 }
 
-async function sendRefundEmail({ to, name, eventTitle, amountKobo }) {
+async function sendRefundEmail({ to, name, eventTitle, amountKobo, cancelled }) {
   const amount = amountKobo === 0 ? 'nothing (free order)' : '₦' + (amountKobo / 100).toLocaleString('en-NG');
   await send({
     to, toName: name,
-    subject: `Your refund for ${eventTitle}`,
-    html: `<p>Hi ${esc(name)},</p><p>We have refunded <b>${esc(amount)}</b> for your order for <b>${esc(eventTitle)}</b>. Your tickets are no longer valid. Banks can take a few days to show the money.</p>`,
+    subject: cancelled ? `${eventTitle} was cancelled: your refund` : `Your refund for ${eventTitle}`,
+    html: cancelled
+      ? `<p>Hi ${esc(name)},</p><p>Unfortunately the organizer cancelled <b>${esc(eventTitle)}</b>. We have refunded <b>${esc(amount)}</b> for your order and your tickets are no longer valid. Banks can take a few days to show the money. We are sorry for the trouble.</p>`
+      : `<p>Hi ${esc(name)},</p><p>We have refunded <b>${esc(amount)}</b> for your order for <b>${esc(eventTitle)}</b>. Your tickets are no longer valid. Banks can take a few days to show the money.</p>`,
   });
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Refund notice for ${to}`);
 }
@@ -111,12 +113,32 @@ async function sendVerificationEmail({ to, name, url }) {
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Confirmation link for ${to}: ${url}`);
 }
 
-async function sendSaleEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, payoutKobo, remaining, dashboardUrl }) {
+async function sendPasswordResetEmail({ to, name, url }) {
+  await send({
+    to, toName: name,
+    subject: 'Reset your Gatepass password',
+    html: `<p>Hi ${esc(name)},</p><p>We received a request to reset the password for your Gatepass account.</p>${button(url, 'Choose a new password')}<p>This link works once and expires in 1 hour. If you did not ask for this, you can ignore this email and your password will stay the same.</p>`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Password reset link for ${to}: ${url}`);
+}
+
+async function sendPayoutEmail({ to, name, eventTitle, amountKobo, accountLabel, ok, reason, dashboardUrl }) {
+  await send({
+    to, toName: name,
+    subject: ok ? `Your payout for ${eventTitle} is on its way` : `We could not send your payout for ${eventTitle}`,
+    html: ok
+      ? `<p>Hi ${esc(name)},</p><p>We sent <b>${esc(money(amountKobo))}</b> from <b>${esc(eventTitle)}</b> to ${esc(accountLabel)}. Banks can take a little while to show it.</p>${button(dashboardUrl, 'View your payouts')}`
+      : `<p>Hi ${esc(name)},</p><p>We tried to send your earnings of <b>${esc(money(amountKobo))}</b> from <b>${esc(eventTitle)}</b> to ${esc(accountLabel)}, but it did not go through.</p><p>Reason: ${esc(reason || 'The bank or payment provider rejected it')}.</p><p>Please check your bank details and press Retry on the Payouts tab.</p>${button(dashboardUrl, 'Open payouts')}`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Payout ${ok ? 'sent' : 'failed'} notice for ${eventTitle}`);
+}
+
+async function sendSaleEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, payoutKobo, remaining, discountCode, discountKobo, dashboardUrl }) {
   await send({
     to, toName: organizerName,
     subject: `New sale: ${quantity} × ${ticketName} for ${eventTitle}`,
     html: `<p>Hi ${esc(organizerName)},</p><p><b>${esc(buyerName)}</b> (${esc(buyerEmail)}) just bought <b>${esc(quantity)} × ${esc(ticketName)}</b> for <b>${esc(eventTitle)}</b>.</p>
-      <p>Paid: ${esc(money(amountKobo))}<br>You earn: ${esc(money(payoutKobo))}<br>Tickets left in this type: ${esc(remaining)}</p>${button(dashboardUrl, 'View your orders')}`,
+      <p>Paid: ${esc(money(amountKobo))}<br>You earn: ${esc(money(payoutKobo))}${discountCode ? `<br>Discount code: ${esc(discountCode)} (buyer saved ${esc(money(discountKobo))})` : ''}<br>Tickets left in this type: ${esc(remaining)}</p>${button(dashboardUrl, 'View your orders')}`,
   });
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Sale notice for ${eventTitle} from ${buyerEmail}`);
 }
@@ -150,4 +172,4 @@ async function sendTestEmail(to) {
   });
 }
 
-module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendVerificationEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail, sendTestEmail, mode };
+module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendVerificationEmail, sendPasswordResetEmail, sendPayoutEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail, sendTestEmail, mode };

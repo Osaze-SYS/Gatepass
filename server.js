@@ -4,10 +4,11 @@ const fs = require('fs');
 const config = require('./src/config');
 const db = require('./src/db');
 const payments = require('./src/payments');
-const { hashPassword, verifyPassword, issueToken, readToken, requireAuth } = require('./src/auth');
+const { hashPassword, verifyPassword, issueToken, readToken, requireAuth, fingerprint } = require('./src/auth');
 const mailer = require('./src/mailer');
+const payouts = require('./src/payouts');
 const { signCode, parseCode, qrDataUrl } = require('./src/tickets');
-const { createOrder, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, notifyBuyersOfEventChange, refundWindow, httpError } = require('./src/orders');
+const { createOrder, quoteOrder, normalizeCode, cancelEvent, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, notifyBuyersOfEventChange, refundWindow, httpError } = require('./src/orders');
 const { buyerFeePerTicket } = require('./src/fees');
 const { parseImage } = require('./src/images');
 const { makeLimiters } = require('./src/ratelimit');
@@ -19,6 +20,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 const intId = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 1 || n > 2147483647) throw httpError(404, 'Not found.'); return n; };
 
 const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const resetUrl = (user) => `${config.baseUrl}/reset.html?token=${encodeURIComponent(issueToken(user.id, false, 'r', 60 * 60e3, fingerprint(user.password_hash)))}`;
 const verifyUrl = (userId) => `${config.baseUrl}/verify.html?token=${encodeURIComponent(issueToken(userId, false, 'v', 2 * 864e5))}`;
 
 // Shared by "create event" and "edit event": reads and checks everything the organizer typed.
@@ -36,6 +38,15 @@ function parseEventBody(body) {
   if (clean.some((t) => (t.id !== null && !Number.isInteger(t.id)) || !t.name || !(t.price >= 0) || t.price > 2000000000 || !Number.isInteger(t.capacity) || t.capacity < 1 || t.capacity > 1000000)) throw httpError(400, 'Each ticket type needs a name, a price (0 or more) and a whole-number capacity.');
   return { title, venue, description, category, refundsAllowed, cutoff, startsAt, types: clean };
 }
+
+// CSV cells: quotes are doubled, and a leading = + - @ is defused so spreadsheet programs never run buyer-typed text as a formula.
+const csvCell = (v) => {
+  let s = v === null || v === undefined ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
+const naira2 = (kobo) => (kobo / 100).toFixed(2);
+const lagosTime = (d) => (d ? new Date(new Date(d).getTime() + 3600e3).toISOString().slice(0, 16).replace('T', ' ') : '');   // Nigeria is UTC+1 all year
 
 const COVER = '(SELECT i.id FROM event_images i WHERE i.event_id = e.id ORDER BY i.position, i.id LIMIT 1)';
 
@@ -78,6 +89,8 @@ function createApp(opts = {}) {
     return row.id;
   };
 
+  app.get('/api/health', wrap(async (_req, res) => { await db.query('SELECT 1'); res.json({ ok: true }); }));   // handy for an uptime pinger
+
   app.get('/api/meta', (_req, res) => res.json({
     categories: CATEGORIES, feePercent: config.feePercent, feePayer: config.feePayer, paymentsLive: payments.live,
     maxImages: config.maxImagesPerEvent,
@@ -108,7 +121,7 @@ function createApp(opts = {}) {
     const user = (await db.query('SELECT * FROM users WHERE email = $1', [str(req.body.email).toLowerCase()])).rows[0];
     if (!user || !verifyPassword(str(req.body.password, 200), user.password_hash)) throw httpError(401, 'Email or password is incorrect.');
     if (!user.email_verified) return res.status(403).json({ error: 'Please confirm your email first. We sent you a link when you signed up.', needsVerification: true, email: user.email });
-    res.json({ token: issueToken(user.id, req.body.remember === true), name: user.name });   // "remember me" = 30 days, otherwise 1 day
+    res.json({ token: issueToken(user.id, req.body.remember === true, 's', undefined, user.session_version), name: user.name });   // "remember me" = 30 days, otherwise 1 day
   }));
 
   // Always answers the same way, so nobody can use this to find out which emails have accounts.
@@ -117,6 +130,26 @@ function createApp(opts = {}) {
     if (user && !user.email_verified && mailer.mode !== 'console') {
       try { await mailer.sendVerificationEmail({ to: user.email, name: user.name, url: verifyUrl(user.id) }); } catch (err) { console.error('[mail] failed:', err.message); }
     }
+    res.json({ ok: true });
+  }));
+
+  // Password reset: always answers the same way, so it cannot be used to find out who has an account.
+  app.post('/api/auth/forgot', limit.auth, wrap(async (req, res) => {
+    const user = (await db.query('SELECT id, name, email, password_hash FROM users WHERE email = $1', [str(req.body.email).toLowerCase()])).rows[0];
+    if (user) {
+      try { await mailer.sendPasswordResetEmail({ to: user.email, name: user.name, url: resetUrl(user) }); } catch (err) { console.error('[mail] failed:', err.message); }
+    }
+    res.json({ ok: true });
+  }));
+
+  app.post('/api/auth/reset', limit.auth, wrap(async (req, res) => {
+    const password = str(req.body.password, 200);
+    if (password.length < 8) throw httpError(400, 'Use a password of at least 8 characters.');
+    const data = readToken(str(req.body.token, 800), 'r');
+    const user = data && (await db.query('SELECT id, password_hash FROM users WHERE id = $1', [data.uid])).rows[0];
+    if (!user || data.x !== fingerprint(user.password_hash)) throw httpError(400, 'This link has expired or was already used. Ask for a new one from the login page.');
+    // New password, every existing login ends, and the email counts as confirmed (they just proved they own it).
+    await db.query('UPDATE users SET password_hash = $2, session_version = session_version + 1, email_verified = TRUE WHERE id = $1', [user.id, hashPassword(password)]);
     res.json({ ok: true });
   }));
 
@@ -130,7 +163,7 @@ function createApp(opts = {}) {
   // ---------------- Browse and search ----------------
   // Filters: q (text), category, when (week|month), price (free|paid), sort (date|price|newest)
   app.get('/api/events', wrap(async (req, res) => {
-    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'", 'e.deleted_at IS NULL'], having = [], params = [];
+    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'", 'e.deleted_at IS NULL', 'e.cancelled_at IS NULL'], having = [], params = [];
     const add = (v) => { params.push(v); return '$' + params.length; };
     const q = str(req.query.q, 80);
     if (q) {
@@ -156,13 +189,14 @@ function createApp(opts = {}) {
   app.get('/api/events/:id', wrap(async (req, res) => {
     await expirePendingOrders();
     const id = intId(req.params.id);
-    const event = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed FROM events WHERE id = $1 AND deleted_at IS NULL', [id])).rows[0];
+    const event = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed, cancelled_at, cancel_reason FROM events WHERE id = $1 AND deleted_at IS NULL', [id])).rows[0];
     if (!event) throw httpError(404, 'Event not found.');
     const types = (await db.query('SELECT id, name, price_kobo, capacity - sold AS remaining FROM ticket_types WHERE event_id = $1 ORDER BY price_kobo, id', [id])).rows;
     event.ticketTypes = types.map((t) => ({ ...t, fee_kobo: buyerFeePerTicket(t.price_kobo) }));
     event.images = (await db.query('SELECT id FROM event_images WHERE event_id = $1 ORDER BY position, id', [id])).rows.map((r) => r.id);
     event.feePayer = config.feePayer;
     const w = refundWindow(event.starts_at, event.refund_cutoff_hours);
+    event.cancelled = Boolean(event.cancelled_at);
     event.refundsAllowed = event.refunds_allowed;
     event.refundPolicy = { allowed: event.refunds_allowed, cutoffHours: event.refund_cutoff_hours, closesAt: w.closesAt, open: event.refunds_allowed && w.open };
     res.json(event);
@@ -183,7 +217,7 @@ function createApp(opts = {}) {
     if (!Number.isInteger(ticketTypeId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 10) throw httpError(400, 'Choose between 1 and 10 tickets.');
     if (!buyerName || !EMAIL.test(buyerEmail)) throw httpError(400, 'Enter your name and a valid email so we can send your tickets.');
 
-    const order = await createOrder({ ticketTypeId, quantity, buyerName, buyerEmail });
+    const order = await createOrder({ ticketTypeId, quantity, buyerName, buyerEmail, code: str(req.body.code, 40) });
     const summary = { subtotal_kobo: order.subtotal_kobo, fee_kobo: order.fee_kobo, amount_kobo: order.amount_kobo };
     if (order.amount_kobo === 0) {            // free tickets skip payment
       await fulfillOrder(order.reference, 0);
@@ -200,6 +234,14 @@ function createApp(opts = {}) {
     }
   }));
 
+  // The price for a ticket and quantity, with an optional discount code. Holds nothing, so the page can call it freely.
+  app.post('/api/quote', limit.quote, wrap(async (req, res) => {
+    await expirePendingOrders();
+    const ticketTypeId = Number(req.body.ticketTypeId), quantity = Number(req.body.quantity);
+    if (!Number.isInteger(ticketTypeId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 10) throw httpError(400, 'Choose between 1 and 10 tickets.');
+    res.json(await quoteOrder({ ticketTypeId, quantity, code: str(req.body.code, 40) }));
+  }));
+
   // Order page data. If Paystack's webhook could not reach us (e.g. on localhost),
   // ask Paystack directly so the buyer still gets their tickets.
   app.get('/api/orders/:reference', wrap(async (req, res) => {
@@ -212,11 +254,11 @@ function createApp(opts = {}) {
       order = await find();
     }
     const info = (await db.query(
-      `SELECT e.id AS event_id, e.title, e.venue, e.starts_at, e.refund_cutoff_hours, e.refunds_allowed, t.name AS ticket_name, ${COVER} AS cover_image_id
+      `SELECT e.id AS event_id, e.title, e.venue, e.starts_at, e.refund_cutoff_hours, e.refunds_allowed, e.cancelled_at, e.cancel_reason, t.name AS ticket_name, ${COVER} AS cover_image_id
        FROM ticket_types t JOIN events e ON e.id = t.event_id WHERE t.id = $1`, [order.ticket_type_id])).rows[0];
     const out = {
       reference: order.reference, status: order.status, quantity: order.quantity, buyer_name: order.buyer_name,
-      subtotal_kobo: order.subtotal_kobo, fee_kobo: order.fee_kobo, amount_kobo: order.amount_kobo,
+      subtotal_kobo: order.subtotal_kobo, fee_kobo: order.fee_kobo, amount_kobo: order.amount_kobo, discount_code: order.discount_code, discount_kobo: order.discount_kobo,
       ...info, cover_image_id: info.cover_image_id, tickets: [],
     };
     if (order.status === 'paid') {
@@ -228,10 +270,10 @@ function createApp(opts = {}) {
       const request = (await db.query('SELECT status, decline_note, created_at FROM refund_requests WHERE order_id = $1', [order.id])).rows[0] || null;
       out.refund = {
         allowed: info.refunds_allowed,
-        available: info.refunds_allowed && w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours,
-        canRequest: info.refunds_allowed && !w.open && !anyUsed && !started && !request,      // after the cutoff the buyer can ask the organizer
+        available: info.refunds_allowed && !info.cancelled_at && w.open && !anyUsed, closesAt: w.closesAt, cutoffHours: info.refund_cutoff_hours,
+        canRequest: info.refunds_allowed && !info.cancelled_at && !w.open && !anyUsed && !started && !request,      // after the cutoff the buyer can ask the organizer
         request,
-        reason: !info.refunds_allowed ? 'none' : anyUsed ? 'used' : w.open ? '' : started ? 'started' : 'closed',
+        reason: info.cancelled_at ? 'cancelled' : !info.refunds_allowed ? 'none' : anyUsed ? 'used' : w.open ? '' : started ? 'started' : 'closed',
       };
     }
     res.json(out);
@@ -263,6 +305,7 @@ function createApp(opts = {}) {
     if (!payments.validWebhookSignature(req.rawBody || Buffer.alloc(0), req.get('x-paystack-signature'))) return res.sendStatus(401);
     const { event, data } = req.body;
     if (event === 'charge.success' && data && data.reference) await fulfillOrder(data.reference, data.amount);
+    else if (typeof event === 'string' && event.startsWith('transfer.') && data && data.reference) await payouts.applyTransferEvent(data.reference, event, data.reason || '');   // payout results
     res.sendStatus(200);          // always acknowledge quickly so Paystack stops retrying
   }));
 
@@ -292,8 +335,9 @@ function createApp(opts = {}) {
     const id = await ownEvent(req.params.id, req.userId);
     const p = parseEventBody(req.body);
     const changed = await db.tx(async (q) => {
-      const ev = (await q('SELECT venue, starts_at FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0];
+      const ev = (await q('SELECT venue, starts_at, cancelled_at FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0];
       if (!ev) throw httpError(404, 'Event not found.');
+      if (ev.cancelled_at) throw httpError(409, 'This event was cancelled, so it cannot be edited.');
       const existing = (await q('SELECT t.id, t.name, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS orders FROM ticket_types t WHERE t.event_id = $1 FOR UPDATE', [id])).rows;
       const byId = new Map(existing.map((t) => [t.id, t]));
       const keep = new Set();
@@ -328,7 +372,7 @@ function createApp(opts = {}) {
     await expirePendingOrders();
     const n = (await db.query(
       `SELECT COUNT(*) AS n FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id
-       WHERE e.id = $1 AND e.starts_at > NOW() - INTERVAL '1 day' AND o.status IN ('paid', 'pending', 'refund_due', 'refund_pending')`, [id])).rows[0].n;
+       WHERE e.id = $1 AND (e.starts_at > NOW() - INTERVAL '1 day' OR e.cancelled_at IS NOT NULL) AND o.status IN ('paid', 'pending', 'refund_due', 'refund_pending')`, [id])).rows[0].n;
     if (n > 0) throw httpError(409, `This event still has ${n} active ${n === 1 ? 'order' : 'orders'}. Refund them from Orders and refunds first, then you can delete it.`);
     await db.query('UPDATE events SET deleted_at = NOW() WHERE id = $1', [id]);
     res.json({ ok: true });
@@ -364,7 +408,7 @@ function createApp(opts = {}) {
 
   app.get('/api/organizer/events', requireAuth, wrap(async (req, res) => {
     await expirePendingOrders();
-    const events = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed FROM events WHERE organizer_id = $1 AND deleted_at IS NULL ORDER BY starts_at DESC', [req.userId])).rows;
+    const events = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed, cancelled_at, cancel_reason FROM events WHERE organizer_id = $1 AND deleted_at IS NULL ORDER BY starts_at DESC', [req.userId])).rows;
     await Promise.all(events.map(async (e) => {
       e.ticketTypes = (await db.query(
         `SELECT t.id, t.name, t.price_kobo, t.capacity, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS order_count,
@@ -376,7 +420,8 @@ function createApp(opts = {}) {
                 COALESCE(SUM(o.fee_kobo) FILTER (WHERE o.status = 'paid'), 0) AS fees,
                 COALESCE(SUM(o.payout_kobo) FILTER (WHERE o.status = 'paid'), 0) AS net,
                 COALESCE(SUM(o.amount_kobo) FILTER (WHERE o.status = 'refunded'), 0) AS refunded,
-                COUNT(*) FILTER (WHERE o.status IN ('refund_due', 'refund_pending')) AS needs_attention
+                COUNT(*) FILTER (WHERE o.status IN ('refund_due', 'refund_pending')) AS needs_attention,
+                COUNT(*) FILTER (WHERE o.status IN ('paid', 'refund_due', 'refund_pending')) AS open_orders
          FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id WHERE t.event_id = $1`, [e.id])).rows[0];
       const waiting = (await db.query(
         `SELECT COUNT(*) AS n FROM refund_requests rr JOIN orders o ON o.id = rr.order_id JOIN ticket_types t ON t.id = o.ticket_type_id
@@ -392,7 +437,7 @@ function createApp(opts = {}) {
     const eventId = await ownEvent(req.params.id, req.userId);
     const { rows } = await db.query(
       `SELECT o.reference, o.buyer_name, o.buyer_email, t.name AS ticket_name, o.quantity, o.amount_kobo, o.fee_kobo, o.payout_kobo,
-              o.status, o.paid_at, o.refunded_at,
+              o.status, o.paid_at, o.refunded_at, o.discount_code,
               (SELECT COUNT(*) FROM tickets k WHERE k.order_id = o.id AND k.checked_in_at IS NOT NULL) AS used,
               rr.status AS request_status, rr.reason AS request_reason, rr.decline_note AS request_note, rr.created_at AS requested_at
        FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id LEFT JOIN refund_requests rr ON rr.order_id = o.id
@@ -410,6 +455,97 @@ function createApp(opts = {}) {
     res.json({ ok: true, ...out });
   }));
 
+  // ---- Payouts: where earnings are sent, and what has been sent ----
+  app.get('/api/organizer/payouts', requireAuth, wrap(async (req, res) => res.json(await payouts.payoutOverview(req.userId))));
+
+  app.get('/api/organizer/payout-banks', requireAuth, wrap(async (_req, res) => res.json(await require('./src/payments').listBanks())));
+
+  // Shows the name on the account so the organizer can check it is theirs before saving.
+  app.post('/api/organizer/payout-account/resolve', requireAuth, limit.quote, wrap(async (req, res) => {
+    res.json(await payouts.resolveAccount({ bankCode: str(req.body.bankCode, 12), accountNumber: str(req.body.accountNumber, 20) }));
+  }));
+
+  app.put('/api/organizer/payout-account', requireAuth, limit.refund, wrap(async (req, res) => {
+    const account = await payouts.savePayoutAccount({ userId: req.userId, bankCode: str(req.body.bankCode, 12), accountNumber: str(req.body.accountNumber, 20) });
+    payouts.runPayouts().catch((err) => console.error('[payout]', err.message));      // earnings that were waiting for an account can go out now
+    res.json(account);
+  }));
+
+  app.post('/api/organizer/payouts/:id/retry', requireAuth, limit.refund, wrap(async (req, res) => {
+    res.json(await payouts.retryPayout({ userId: req.userId, payoutId: intId(req.params.id) }));
+  }));
+
+  // Cancel an event and refund everyone. Call it again to finish if some refunds are left (it only touches what is unfinished).
+  app.post('/api/organizer/events/:id/cancel', requireAuth, limit.refund, wrap(async (req, res) => {
+    const result = await cancelEvent({ eventId: intId(req.params.id), organizerId: req.userId, reason: str(req.body.reason, 300), budgetMs: opts.cancelBudgetMs });
+    res.json({ ok: true, ...result });
+  }));
+
+  // Sales per day (Lagos time) for the dashboard charts: all of an organizer's events, or one. Refunded orders are not counted.
+  app.get('/api/organizer/sales', requireAuth, wrap(async (req, res) => {
+    const days = Math.min(365, Math.max(7, Number(req.query.days) || 30));
+    const eventId = req.query.event ? await ownEvent(req.query.event, req.userId) : null;
+    const from = 'FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id';
+    const scope = (eventParam) => `e.organizer_id = $1 AND e.deleted_at IS NULL AND o.status = 'paid'${eventId ? ` AND e.id = $${eventParam}` : ''}`;
+    const perDay = (await db.query(
+      `SELECT to_char((o.paid_at AT TIME ZONE 'UTC' + INTERVAL '1 hour')::date, 'YYYY-MM-DD') AS day,
+              SUM(o.quantity) AS tickets, COUNT(*) AS orders, SUM(o.amount_kobo) AS gross_kobo, SUM(o.payout_kobo) AS earnings_kobo
+       ${from} WHERE ${scope(3)} AND o.paid_at >= NOW() - make_interval(days => $2::int) GROUP BY 1 ORDER BY 1`, [req.userId, days, ...(eventId ? [eventId] : [])])).rows;
+    const byType = (await db.query(
+      `SELECT t.name, e.title AS event_title, SUM(o.quantity) AS tickets, SUM(o.payout_kobo) AS earnings_kobo
+       ${from} WHERE ${scope(2)} GROUP BY t.id, t.name, e.title ORDER BY SUM(o.payout_kobo) DESC, t.id`, [req.userId, ...(eventId ? [eventId] : [])])).rows;
+    res.json({ days, perDay, byType });
+  }));
+
+  // The guest list as a spreadsheet file (sent with the login header, so the page downloads it with fetch).
+  app.get('/api/organizer/events/:id/export.csv', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    const event = (await db.query('SELECT title FROM events WHERE id = $1', [id])).rows[0];
+    const rows = (await db.query(
+      `SELECT o.reference, o.buyer_name, o.buyer_email, t.name AS ticket_name, o.quantity, o.discount_code, o.discount_kobo, o.amount_kobo, o.fee_kobo, o.payout_kobo, o.status, o.paid_at,
+              (SELECT COUNT(*) FROM tickets k WHERE k.order_id = o.id AND k.checked_in_at IS NOT NULL) AS checked_in
+       FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id
+       WHERE t.event_id = $1 AND o.status IN ('paid', 'refund_due', 'refund_pending', 'refunded') ORDER BY o.paid_at, o.id`, [id])).rows;
+    const head = ['Order', 'Name', 'Email', 'Ticket', 'Quantity', 'Discount code', 'Discount (NGN)', 'Paid (NGN)', 'Platform fee (NGN)', 'You earn (NGN)', 'Status', 'Paid at (Lagos time)', 'Checked in'];
+    const lines = [head, ...rows.map((o) => [o.reference, o.buyer_name, o.buyer_email, o.ticket_name, o.quantity, o.discount_code, naira2(o.discount_kobo), naira2(o.amount_kobo), naira2(o.fee_kobo), naira2(o.payout_kobo), o.status, lagosTime(o.paid_at), `${o.checked_in} of ${o.quantity}`])];
+    const slug = event.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'event';
+    res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="guests-${slug}.csv"` });
+    res.send('\uFEFF' + lines.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n');      // the BOM makes Excel read the file as UTF-8
+  }));
+
+  // ---- Discount codes (organizers manage them per event) ----
+  app.get('/api/organizer/events/:id/discounts', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    res.json((await db.query('SELECT id, code, kind, value, max_uses, used_count, expires_at, active FROM discount_codes WHERE event_id = $1 ORDER BY id DESC', [id])).rows);
+  }));
+
+  app.post('/api/organizer/events/:id/discounts', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    const code = normalizeCode(req.body.code);
+    if (!/^[A-Z0-9_-]{3,20}$/.test(code)) throw httpError(400, 'Use 3 to 20 letters, numbers, dashes or underscores for the code.');
+    const kind = req.body.kind;
+    if (kind !== 'percent' && kind !== 'fixed') throw httpError(400, 'Choose a percentage or a fixed amount.');
+    const number = Number(req.body.value);
+    const value = kind === 'percent' ? number : Math.round(number * 100);        // a fixed amount is typed in naira and stored in kobo
+    if (!Number.isInteger(value) || value < 1 || (kind === 'percent' ? value > 100 : value > 2000000000)) throw httpError(400, kind === 'percent' ? 'A percentage must be a whole number from 1 to 100.' : 'Enter an amount of at least ₦1.');
+    const blank = req.body.maxUses === undefined || req.body.maxUses === null || req.body.maxUses === '';
+    const maxUses = blank ? null : Number(req.body.maxUses);
+    if (!blank && (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 1000000)) throw httpError(400, 'Maximum uses must be a whole number of at least 1, or left empty for unlimited.');
+    const noExpiry = req.body.expiresAt === undefined || req.body.expiresAt === null || req.body.expiresAt === '';
+    const expiresAt = noExpiry ? null : new Date(req.body.expiresAt);
+    if (!noExpiry && (isNaN(expiresAt) || expiresAt <= new Date())) throw httpError(400, 'The expiry must be a date and time in the future.');
+    const made = await db.query('INSERT INTO discount_codes (event_id, code, kind, value, max_uses, expires_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (event_id, code) DO NOTHING RETURNING id', [id, code, kind, value, maxUses, expiresAt]);
+    if (!made.rows.length) throw httpError(409, 'You already have a code with that name for this event.');
+    res.status(201).json({ id: made.rows[0].id });
+  }));
+
+  app.post('/api/organizer/events/:id/discounts/:codeId/toggle', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    const done = await db.query('UPDATE discount_codes SET active = $3 WHERE id = $1 AND event_id = $2 RETURNING id', [intId(req.params.codeId), id, req.body.active === true]);
+    if (!done.rows.length) throw httpError(404, 'Discount code not found.');
+    res.json({ ok: true });
+  }));
+
   // Approve or decline a buyer's refund request (organizers only, for their own events).
   app.post('/api/organizer/orders/:reference/refund-request/decide', requireAuth, limit.refund, wrap(async (req, res) => {
     const out = await decideRefundRequest({ reference: str(req.params.reference, 60), organizerId: req.userId, action: str(req.body.action, 10), note: str(req.body.note, 300) });
@@ -421,12 +557,13 @@ function createApp(opts = {}) {
     const id = parseCode(req.body.code);
     if (!id) return res.json({ result: 'invalid', message: 'Not a valid ticket.' });
     const ticket = (await db.query(
-      `SELECT k.id, k.checked_in_at, k.voided_at, t.name AS ticket_name, e.title, e.organizer_id, o.buyer_name
+      `SELECT k.id, k.checked_in_at, k.voided_at, t.name AS ticket_name, e.title, e.organizer_id, e.cancelled_at, o.buyer_name
        FROM tickets k JOIN ticket_types t ON t.id = k.ticket_type_id
        JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = k.order_id WHERE k.id = $1`, [id])).rows[0];
     if (!ticket) return res.json({ result: 'invalid', message: 'Ticket not found.' });
     if (ticket.organizer_id !== req.userId) return res.json({ result: 'wrong_event', message: 'This ticket is for an event you do not manage.' });
     const base = { event: ticket.title, ticketType: ticket.ticket_name, buyer: ticket.buyer_name };
+    if (ticket.cancelled_at) return res.json({ result: 'cancelled', message: 'This event was cancelled.', ...base });
     if (ticket.voided_at) return res.json({ result: 'refunded', message: 'This ticket was refunded.', ...base });
     // Atomic: only one scan can flip NULL -> timestamp, so a ticket cannot be used twice.
     const done = await db.query('UPDATE tickets SET checked_in_at = NOW() WHERE id = $1 AND checked_in_at IS NULL AND voided_at IS NULL RETURNING id', [id]);
@@ -449,7 +586,10 @@ function createApp(opts = {}) {
 
 if (require.main === module) {
   db.init().then(() => {
-    setInterval(() => expirePendingOrders().catch((e) => console.error(e)), 60 * 1000).unref();
+    setInterval(() => {
+      expirePendingOrders().catch((e) => console.error(e));
+      if (config.payoutsEnabled) payouts.runPayouts().catch((e) => console.error('[payout]', e.message));
+    }, 60 * 1000).unref();
     createApp().listen(config.port, () => {
       console.log(`Gatepass running at ${config.baseUrl}`);
       console.log(`Database: ${db.kind}`);

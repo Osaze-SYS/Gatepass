@@ -25,7 +25,7 @@ async function load() {
   if (o.status === 'expired') return message('This order expired', 'The payment was not completed in time, so the tickets were released.', '<p><a class="btn" href="/event.html?id=' + o.event_id + '">Try again</a></p>');
   if (o.status === 'refund_due') return message('Payment received, but the event sold out', `Your payment arrived after the hold ended and the last tickets were gone. The organizer will refund you. Keep this reference: <b>${esc(o.reference)}</b>.`);
   if (o.status === 'refund_pending') return message('Your refund is being processed', 'The tickets for this order no longer work. The money is on its way back to you.');
-  if (o.status === 'refunded') return message('This order was refunded', `We returned ${nairaZero(o.amount_kobo)}. Banks can take a few days to show it.`, '<p><a class="btn" href="/">Browse events</a></p>');
+  if (o.status === 'refunded') return message('This order was refunded', `${o.cancelled_at ? 'The organizer cancelled this event, so we returned' : 'We returned'} ${nairaZero(o.amount_kobo)}. Banks can take a few days to show it.`, '<p><a class="btn" href="/">Browse events</a></p>');
 
   const r = o.refund;
   let refundBlock;
@@ -45,7 +45,7 @@ async function load() {
         <div class="field"><label for="qreason">Why do you need a refund? (optional)</label><textarea id="qreason" maxlength="300" rows="3"></textarea></div>
         <div id="qmsg" role="alert"></div><button class="btn" id="send-request">Send refund request</button></details>`;
   } else {
-    refundBlock = `<p class="muted small no-print">${r.reason === 'none' ? 'This event has a no-refund policy. All sales are final.' : r.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : 'This event has already started, so refunds are closed. Contact the organizer if you need help.'}</p>`;
+    refundBlock = `<p class="muted small no-print">${r.reason === 'cancelled' ? 'This event was cancelled. Your refund is on its way.' : r.reason === 'none' ? 'This event has a no-refund policy. All sales are final.' : r.reason === 'used' ? 'Tickets that were already used at the gate cannot be refunded.' : 'This event has already started, so refunds are closed. Contact the organizer if you need help.'}</p>`;
   }
 
   const shareUrl = `${location.origin}/event.html?id=${o.event_id}`;
@@ -55,6 +55,7 @@ async function load() {
       <div class="row" style="margin-top:.7rem"><a class="btn secondary sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(shareText + ' ' + shareUrl)}">Share on WhatsApp</a>${navigator.share ? '<button class="btn secondary sm" id="native-share">More ways to share</button>' : ''}</div></div>`;
 
   page.innerHTML = `
+    ${o.cancelled_at ? '<div class="notice warn"><b>This event was cancelled.</b> We are refunding every order, so your money is on its way back. Your tickets no longer work.</div>' : ''}
     <div class="card banner" style="margin-bottom:1.4rem"><div class="thumb">${cover(o.cover_image_id, '', o.title)}</div>
       <div class="grow"><span class="badge ok">${ICON.tick.replace('<svg', '<svg style="width:.9rem;height:.9rem;vertical-align:-.15rem"')} Confirmed</span>
       <h1 style="font-size:1.8rem;margin-top:.3rem">You're going, ${esc(o.buyer_name.split(' ')[0])}!</h1>
@@ -67,11 +68,12 @@ async function load() {
         <p class="small" style="margin:.8rem 0 0"><b>Ticket ${i + 1} of ${o.tickets.length}</b> · ${esc(o.buyer_name)}<br>${t.checkedIn ? '<span class="badge warn">Already used at the gate</span>' : 'Ready to scan'}</p></div>
         <div class="side"><img class="qr" src="${t.qr}" alt="QR code for ticket ${i + 1}"></div></div>`).join('')}</div>
     <div class="card flat" style="margin:1.4rem 0"><h3>Order summary</h3>
-      <div class="sum" style="border:0;margin:0;padding:0"><div><span>${o.quantity} × ${esc(o.ticket_name)}</span><span>${naira(o.subtotal_kobo)}</span></div>
+      <div class="sum" style="border:0;margin:0;padding:0"><div><span>${o.quantity} × ${esc(o.ticket_name)}</span><span>${naira(o.subtotal_kobo + (o.discount_kobo || 0))}</span></div>
+        ${o.discount_kobo ? `<div class="ok-text"><span>Discount (${esc(o.discount_code)})</span><span>−${nairaZero(o.discount_kobo)}</span></div>` : ''}
         ${o.fee_kobo && o.amount_kobo > o.subtotal_kobo ? `<div class="muted"><span>Service fee</span><span>${nairaZero(o.fee_kobo)}</span></div>` : ''}
         <div class="total"><span>Total paid</span><span>${naira(o.amount_kobo)}</span></div></div>
       <p class="muted small" style="margin:.8rem 0 0">Order reference: ${esc(o.reference)}</p></div>
-    ${shareBlock}
+    ${o.cancelled_at ? '' : shareBlock}
     ${refundBlock}`;
 
   document.querySelector('#copy-link')?.addEventListener('click', async () => {

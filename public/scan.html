@@ -17,7 +17,7 @@
 if (!getToken()) { document.querySelector('#gate').hidden = false; document.querySelector('#tool').hidden = true; }
 const out = document.querySelector('#result'), logBox = document.querySelector('#log'), log = [];
 let busy = false;
-const tone = { valid: 'valid', already_used: 'warn', refunded: 'bad', invalid: 'bad', wrong_event: 'bad' };
+const tone = { valid: 'valid', already_used: 'warn', refunded: 'bad', cancelled: 'bad', invalid: 'bad', wrong_event: 'bad' };
 async function check(code) {
   if (busy || !code) return; busy = true;
   try {

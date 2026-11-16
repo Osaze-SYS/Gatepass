@@ -335,3 +335,7 @@ test('shared event links carry a preview with the event details (escaped)', asyn
   const generic = await (await fetch(`${base}/event.html?id=999999`)).text();
   assert.ok(generic.includes('<title>Event · Gatepass</title>') && !generic.includes('og:title'));
 });
+
+test('health check answers for uptime pingers', async () => {
+  assert.deepStrictEqual((await api('/api/health')).body, { ok: true });
+});

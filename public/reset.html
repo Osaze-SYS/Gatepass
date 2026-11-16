@@ -1,0 +1,30 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Choose a new password · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="max-width:30rem;padding-top:3rem"><div class="card" id="box">
+  <h1 style="font-size:2rem" class="center">Choose a new password</h1>
+  <form id="reset" novalidate>
+    <div class="field"><label for="p1">New password</label><input id="p1" type="password" autocomplete="new-password" minlength="8" required><div class="hint">Use at least 8 characters.</div></div>
+    <div class="field"><label for="p2">Type it again</label><input id="p2" type="password" autocomplete="new-password" required></div>
+    <div id="msg" role="alert"></div>
+    <button class="btn lg block" id="go">Save new password</button>
+  </form>
+</div></div></main>
+<script src="/js/common.js"></script>
+<script>
+const token = new URLSearchParams(location.search).get('token');
+const box = document.querySelector('#box'), msg = document.querySelector('#msg');
+if (!token) box.innerHTML = '<h1 style="font-size:2rem">This link is incomplete</h1><p class="muted">Open the link from your reset email again, or ask for a new one from the login page.</p><a class="btn" href="/organizer.html">Go to login</a>';
+document.querySelector('#reset')?.addEventListener('submit', async (e) => {
+  e.preventDefault(); msg.innerHTML = '';
+  const p1 = document.querySelector('#p1').value, p2 = document.querySelector('#p2').value;
+  if (p1.length < 8) { msg.innerHTML = '<p class="notice err">Use a password of at least 8 characters.</p>'; return; }
+  if (p1 !== p2) { msg.innerHTML = '<p class="notice err">The two passwords are not the same.</p>'; return; }
+  const btn = document.querySelector('#go'); btn.disabled = true;
+  try {
+    await api('/api/auth/reset', { token, password: p1 });
+    clearSession();
+    box.innerHTML = '<div class="center stack"><span class="badge ok">Password changed</span><h1 style="font-size:2rem">All done</h1><p class="muted">Your password was changed and you were logged out everywhere. Log in with the new one.</p><a class="btn lg" href="/organizer.html">Log in</a></div>';
+  } catch (err) { msg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; btn.disabled = false; }
+});
+</script></body></html>

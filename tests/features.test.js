@@ -145,3 +145,40 @@ test('changing the date or venue emails everyone holding tickets, other edits do
   assert.deepStrictEqual(updates().map((m) => m.to).sort(), ['fbuyer5@test.dev', 'fbuyer6@test.dev']);
   assert.ok(updates()[0].html.includes('Brand New Venue') && updates()[0].html.includes('still valid'));
 });
+
+// ---------- password reset ----------
+const tokenIn = (m, page) => decodeURIComponent(new RegExp(`${page}\\.html\\?token=([^"&]+)`).exec(m.html)[1]);
+
+test('password reset: a single-use emailed link, every login ends, and nothing leaks about who has an account', async () => {
+  const org = await makeOrganizer('reset@features.test');
+  assert.strictEqual((await api('/api/organizer/events', null, org)).status, 200);
+
+  assert.strictEqual((await api('/api/auth/forgot', { email: 'ghost@features.test' })).status, 200);       // same answer for unknown emails
+  assert.strictEqual((await api('/api/auth/forgot', { email: 'reset@features.test' })).status, 200);
+  assert.ok(await waitFor(() => mails('reset@features.test', 'Reset your').length === 1));
+  assert.strictEqual(mails('ghost@features.test', 'Reset').length, 0);
+  const mail = mails('reset@features.test', 'Reset your')[0];
+  assert.ok(mail.html.includes('https://gatepass.example/reset.html?token='));
+  const token = tokenIn(mail, 'reset');
+
+  assert.strictEqual((await api('/api/auth/reset', { token, password: 'short' })).status, 400);
+  assert.strictEqual((await api('/api/auth/reset', { token: 'garbage', password: 'brand-new-pass' })).status, 400);
+  assert.strictEqual((await api('/api/auth/reset', { token: org, password: 'brand-new-pass' })).status, 400);    // a login token is not a reset link
+  assert.strictEqual((await api('/api/auth/reset', { token, password: 'brand-new-pass' })).status, 200);
+
+  assert.strictEqual((await api('/api/organizer/events', null, org)).status, 401);                               // the old login no longer works anywhere
+  assert.strictEqual((await api('/api/auth/login', { email: 'reset@features.test', password: 'password123' })).status, 401);
+  const fresh = await api('/api/auth/login', { email: 'reset@features.test', password: 'brand-new-pass' });
+  assert.strictEqual(fresh.status, 200);
+  assert.strictEqual((await api('/api/organizer/events', null, fresh.body.token)).status, 200);
+  assert.strictEqual((await api('/api/auth/reset', { token, password: 'another-new-pass' })).status, 400);        // the link only works once
+});
+
+test('password reset also confirms an account that was never confirmed', async () => {
+  await api('/api/auth/register', { name: 'Late', email: 'late@features.test', password: 'password123' });
+  assert.strictEqual((await api('/api/auth/login', { email: 'late@features.test', password: 'password123' })).status, 403);
+  await api('/api/auth/forgot', { email: 'late@features.test' });
+  assert.ok(await waitFor(() => mails('late@features.test', 'Reset your').length === 1));
+  assert.strictEqual((await api('/api/auth/reset', { token: tokenIn(mails('late@features.test', 'Reset your')[0], 'reset'), password: 'chosen-password' })).status, 200);
+  assert.strictEqual((await api('/api/auth/login', { email: 'late@features.test', password: 'chosen-password' })).status, 200);
+});

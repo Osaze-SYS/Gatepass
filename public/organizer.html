@@ -7,7 +7,8 @@
 const app = document.querySelector('#app');
 const $ = (s) => document.querySelector(s);
 let meta, events = [], tab = 'overview', picked = [];
-const open = new Set(), ordersCache = {};
+const open = new Set(), ordersCache = {}, salesCache = {}, codesCache = {};
+let payoutData = null, banks = null;
 
 const feeText = () => `Gatepass charges ${meta.feePercent}% per paid ticket. ${meta.feePayer === 'buyer' ? 'Buyers pay it on top, so you keep your full ticket price.' : 'It is deducted from your payout.'} Free tickets cost nothing.`;
 const statusBadge = (s) => ({ paid: '<span class="badge ok">Paid</span>', refunded: '<span class="badge">Refunded</span>', refund_due: '<span class="badge warn">Needs refund</span>', refund_pending: '<span class="badge warn">Refund pending</span>' }[s] || esc(s));
@@ -25,14 +26,16 @@ function auth() {
       <div class="field" id="name-wrap" hidden><label for="aname">Your name</label><input id="aname" autocomplete="name"></div>
       <div class="field"><label for="aemail">Email</label><input id="aemail" type="email" autocomplete="email" required value="${esc(rememberedEmail)}"></div>
       <div class="field"><label for="apass">Password</label><input id="apass" type="password" autocomplete="current-password" required><div class="hint" id="phint" hidden>Use at least 8 characters. We will email you a link to confirm your address.</div></div>
+      <p class="small" id="forgot-wrap" style="margin:-.4rem 0 1rem"><a href="#" id="forgot">Forgot your password?</a></p>
       <label class="check" id="remember-wrap"><input type="checkbox" id="remember" ${rememberedEmail ? 'checked' : ''}> Remember me on this device</label>
       <div id="amsg" role="alert"></div><button class="btn lg block" id="asubmit">Log in</button>
       ${location.hostname === 'localhost' ? '<p class="muted small" style="margin:.9rem 0 0">Trying it out? Demo login: demo@gatepass.dev / password123</p>' : ''}
     </form></div></div>`;
   let mode = 'login';
-  const setMode = (m) => { mode = m; $('#name-wrap').hidden = $('#phint').hidden = m === 'login'; $('#remember-wrap').hidden = m !== 'login'; $('#asubmit').textContent = m === 'login' ? 'Log in' : 'Create my account';
+  const setMode = (m) => { mode = m; $('#name-wrap').hidden = $('#phint').hidden = m === 'login'; $('#remember-wrap').hidden = $('#forgot-wrap').hidden = m !== 'login'; $('#asubmit').textContent = m === 'login' ? 'Log in' : 'Create my account';
     $('#t-login').setAttribute('aria-selected', m === 'login'); $('#t-reg').setAttribute('aria-selected', m !== 'login'); $('#apass').autocomplete = m === 'login' ? 'current-password' : 'new-password'; };
   $('#t-login').onclick = () => setMode('login'); $('#t-reg').onclick = () => setMode('register');
+  $('#forgot').onclick = (e) => { e.preventDefault(); forgotDialog($('#aemail').value.trim()); };
   $('#auth').onsubmit = async (e) => {
     e.preventDefault(); const b = $('#asubmit'); b.disabled = true; $('#amsg').innerHTML = '';
     const email = $('#aemail').value.trim(), remember = mode === 'login' && $('#remember').checked;
@@ -70,6 +73,27 @@ function confirmEmailDialog(email, fromLogin) {
   d.showModal();
 }
 
+// Asks for the account email and sends a reset link. The answer never says whether the email has an account.
+function forgotDialog(prefill) {
+  const d = document.createElement('dialog');
+  d.innerHTML = `<h2>Reset your password</h2><p class="muted">Enter your account email and we will send you a link to choose a new password.</p>
+    <div class="field"><label for="fp-email">Email</label><input id="fp-email" type="email" autocomplete="email" value="${esc(prefill || '')}"></div>
+    <div id="fp-msg" role="alert"></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn secondary" value="cancel">Cancel</button><button class="btn" value="send">Send reset link</button></div>`;
+  document.body.append(d);
+  d.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button'); if (!btn) return;
+    if (btn.value !== 'send') return d.close();
+    const email = d.querySelector('#fp-email').value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { d.querySelector('#fp-msg').innerHTML = '<p class="notice err">Enter a valid email address.</p>'; return; }
+    btn.disabled = true;
+    try { await api('/api/auth/forgot', { email }); d.close(); toast('If an account exists for that email, a reset link is on its way.'); }
+    catch (err) { d.querySelector('#fp-msg').innerHTML = `<p class="notice err">${esc(err.message)}</p>`; btn.disabled = false; }
+  });
+  d.addEventListener('close', () => d.remove());
+  d.showModal();
+}
+
 // ---------------------------------------------------------------- dashboard
 async function load() {
   try { events = await api('/api/organizer/events'); }
@@ -82,7 +106,7 @@ async function dashboard() {
   app.innerHTML = `<div class="container rise-kids" style="padding-top:2rem">
     <div class="row spread"><div><h1 style="font-size:2.1rem;margin:0">Hi, ${esc(getName().split(' ')[0] || 'there')}</h1><p class="muted" style="margin:0">Manage your events, sales and guests.</p></div>
       <div class="row"><a class="btn secondary" href="/scan.html">Scan tickets</a><button class="btn secondary" id="logout">Log out</button></div></div>
-    <div class="tabs" role="tablist" id="tabs">${[['overview', 'Overview'], ['events', 'My events'], ['create', 'Create event']].map(([k, l]) => `<button role="tab" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div class="tabs" role="tablist" id="tabs">${[['overview', 'Overview'], ['events', 'My events'], ['payouts', 'Payouts'], ['create', 'Create event']].map(([k, l]) => `<button role="tab" data-tab="${k}">${l}</button>`).join('')}</div>
     <div id="panel"></div></div>`;
   $('#logout').onclick = () => { clearSession(); location.href = '/'; };
   $('#tabs').onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) { if (b.dataset.tab === 'create' && tab !== 'create') editing = null; tab = b.dataset.tab; render(); } };
@@ -94,8 +118,10 @@ async function dashboard() {
 function render() {
   document.querySelectorAll('#tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $('#tabs [data-tab="create"]').textContent = editing ? 'Edit event' : 'Create event';
-  $('#panel').innerHTML = { overview, events: eventsTab, create: createTab }[tab]();
+  $('#panel').innerHTML = { overview, events: eventsTab, payouts: payoutsTab, create: createTab }[tab]();
   if (tab === 'create') initCreate();
+  if (tab === 'overview') loadOverviewCharts();
+  if (tab === 'payouts') loadPayouts();
 }
 
 function overview() {
@@ -106,10 +132,80 @@ function overview() {
   return `${attention ? `<div class="notice warn row spread"><span>${attention} ${attention === 1 ? 'order needs' : 'orders need'} a refund decision.</span><button class="btn sm" data-act="go" data-tab="events">Review</button></div>` : ''}
     <div class="stats"><div class="stat"><b>${nairaZero(sum('net'))}</b><span>Your earnings</span></div><div class="stat"><b>${sold}</b><span>Tickets sold</span></div>
       <div class="stat"><b>${nairaZero(sum('gross'))}</b><span>Total paid by buyers</span></div><div class="stat"><b>${nairaZero(sum('fees'))}</b><span>Platform fees</span></div><div class="stat"><b>${nairaZero(sum('refunded'))}</b><span>Refunded</span></div></div>
+    <div class="charts"><div class="card"><h3>Tickets sold per day</h3><p class="muted small">Last 30 days</p><div id="chart-tickets"><span class="spinner"></span></div></div>
+      <div class="card"><h3>Your earnings per day</h3><p class="muted small">Last 30 days, after fees</p><div id="chart-earnings"></div></div></div>
     <h2>Your events</h2><div class="stack">${events.slice(0, 5).map((e) => {
       const issued = e.ticketTypes.reduce((a, t) => a + Number(t.issued), 0), cap = e.ticketTypes.reduce((a, t) => a + t.capacity, 0);
       return `<div class="card banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><b>${esc(e.title)}</b><div class="muted small">${esc(fmtShort(e.starts_at))} · ${esc(e.venue)}</div></div>
         <div style="min-width:9rem"><div class="small muted">${issued} of ${cap} sold</div><div class="bar"><i style="width:${cap ? Math.round(issued / cap * 100) : 0}%"></i></div></div></div>`; }).join('')}</div>`;
+}
+
+async function loadOverviewCharts() {
+  const tix = $('#chart-tickets'), earn = $('#chart-earnings'); if (!tix) return;
+  try {
+    const sales = await api('/api/organizer/sales?days=30');
+    if (!$('#chart-tickets')) return;                                   // the tab changed while loading
+    const none = !sales.perDay.length;
+    tix.innerHTML = none ? '<p class="muted">No sales in the last 30 days yet.</p>' : barChart(dayPoints(sales.perDay, 30, (d) => d.tickets, (v) => `${v} ticket${v === 1 ? '' : 's'}`), { ariaLabel: 'Tickets sold per day' });
+    earn.innerHTML = none ? '<p class="muted">Earnings appear here after your first sale.</p>' : barChart(dayPoints(sales.perDay, 30, (d) => d.earnings_kobo, (v) => nairaZero(v)), { yFormat: compactNaira, ariaLabel: 'Earnings per day' });
+  } catch (err) { tix.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; }
+}
+async function loadSales(id) { salesCache[id] = await api(`/api/organizer/sales?event=${id}&days=30`); }
+async function loadCodes(id) { codesCache[id] = await api(`/api/organizer/events/${id}/discounts`); }
+
+function salesPanel(e) {
+  const sales = salesCache[e.id];
+  if (!sales) return '<div class="card flat" style="margin-top:1rem"><span class="spinner"></span> Loading sales…</div>';
+  return `<div class="card flat" style="margin-top:1rem"><h3>Sales</h3>${sales.byType.length ? `
+    <div class="charts"><div><p class="small muted">Tickets sold per day (last ${sales.days} days)</p>${barChart(dayPoints(sales.perDay, sales.days, (d) => d.tickets, (v) => `${v} ticket${v === 1 ? '' : 's'}`), { ariaLabel: 'Tickets sold per day' })}</div>
+      <div><p class="small muted">Your earnings per day</p>${barChart(dayPoints(sales.perDay, sales.days, (d) => d.earnings_kobo, (v) => nairaZero(v)), { yFormat: compactNaira, ariaLabel: 'Earnings per day' })}</div></div>
+    <div class="table-wrap"><table><thead><tr><th>Ticket type</th><th>Sold</th><th>Your earnings</th></tr></thead><tbody>${sales.byType.map((x) => `<tr><td>${esc(x.name)}</td><td>${x.tickets}</td><td>${nairaZero(Number(x.earnings_kobo))}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No sales yet.</p>'}</div>`;
+}
+
+const discountLabel = (c) => (c.kind === 'percent' ? `${c.value}% off` : `${nairaZero(c.value)} off each ticket`);
+function codesPanel(e) {
+  const rows = codesCache[e.id];
+  if (!rows) return '<div class="card flat" style="margin-top:1rem"><span class="spinner"></span> Loading codes…</div>';
+  return `<div class="card flat" style="margin-top:1rem"><h3>Discount codes</h3><p class="muted small">Buyers type a code on the event page. The discount comes off each ticket, and the platform fee is worked out on the lower price. A code can be used once per order.</p>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Discount</th><th>Used</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>${rows.map((c) => `<tr><td><b>${esc(c.code)}</b></td><td>${esc(discountLabel(c))}</td><td>${c.used_count}${c.max_uses ? ' of ' + c.max_uses : ''}</td><td>${c.expires_at ? esc(fmtShort(c.expires_at)) : 'Never'}</td><td>${c.active ? '<span class="badge ok">On</span>' : '<span class="badge">Off</span>'}</td>
+      <td><button class="btn sm secondary" data-act="toggle-code" data-ev="${e.id}" data-id="${c.id}" data-active="${c.active ? 0 : 1}">${c.active ? 'Turn off' : 'Turn on'}</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No codes yet.</p>'}
+    <div class="inline-form" id="code-form-${e.id}">
+      <div class="field"><label>Code</label><input class="c-code" maxlength="20" placeholder="EARLYBIRD" autocapitalize="characters"></div>
+      <div class="field"><label>Type</label><select class="c-kind"><option value="percent">Percent off</option><option value="fixed">₦ off each ticket</option></select></div>
+      <div class="field"><label>Amount</label><input class="c-value" type="number" min="1" step="1" placeholder="20"></div>
+      <div class="field"><label>Max uses (optional)</label><input class="c-max" type="number" min="1" step="1" placeholder="Unlimited"></div>
+      <div class="field"><label>Expires (optional)</label><input class="c-exp" type="datetime-local"></div>
+      <div class="field"><button class="btn" data-act="add-code" data-ev="${e.id}">Add code</button></div></div></div>`;
+}
+
+// ---------------------------------------------------------------- payouts
+const payoutBadge = (st) => ({ success: '<span class="badge ok">Sent</span>', processing: '<span class="badge warn">On its way</span>', pending: '<span class="badge">Scheduled</span>', failed: '<span class="badge bad">Failed</span>', reversed: '<span class="badge bad">Returned</span>' }[st] || esc(st));
+const payoutsTab = () => '<div id="payouts-box"><p class="muted"><span class="spinner"></span> Loading…</p></div>';
+async function loadPayouts() {
+  const box = $('#payouts-box'); if (!box) return;
+  try { [payoutData, banks] = await Promise.all([api('/api/organizer/payouts'), banks ? Promise.resolve(banks) : api('/api/organizer/payout-banks')]); }
+  catch (err) { box.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; return; }
+  drawPayouts();
+}
+function drawPayouts() {
+  const box = $('#payouts-box'); if (!box || !payoutData) return;
+  const p = payoutData;
+  box.innerHTML = `${p.practiceMode ? '<div class="notice info">Practice mode: payouts are simulated and no real money moves. They become real when the site uses a live Paystack key.</div>' : ''}
+    <div class="card"><h2>Where we send your earnings</h2>
+      ${p.account ? `<p><b>${esc(p.account.account_name)}</b><br><span class="muted">${esc(p.account.bank_name)} ••••${esc(p.account.account_last4)}</span></p><button class="btn secondary sm" data-act="change-account">Change account</button>` : '<p class="muted">Add your bank account to receive your earnings. Until then your money waits safely here.</p>'}
+      <div id="account-form" ${p.account ? 'hidden' : ''}>
+        <div class="inline-form"><div class="field"><label for="pa-bank">Bank</label><select id="pa-bank"><option value="">Choose your bank</option>${banks.map((b) => `<option value="${esc(b.code)}">${esc(b.name)}</option>`).join('')}</select></div>
+          <div class="field"><label for="pa-number">Account number</label><input id="pa-number" inputmode="numeric" maxlength="10" placeholder="10 digits" autocomplete="off"></div>
+          <div class="field"><button class="btn secondary" data-act="check-account">Check account</button></div></div>
+        <div id="pa-result" role="status" style="margin-top:.6rem"></div></div>
+      <p class="muted small" style="margin:1rem 0 0">Earnings are sent automatically ${p.delayHours} hours after your event starts, so refunds are settled first. An order with a refund request still waiting is held back until you decide.</p></div>
+    <h3 style="margin-top:1.6rem">Coming up</h3>
+    ${p.upcoming.length ? `<div class="card flat table-wrap"><table><thead><tr><th>Event</th><th>Amount</th><th>Sent around</th><th></th></tr></thead><tbody>${p.upcoming.map((u) => `<tr><td>${esc(u.title)}</td><td>${nairaZero(Number(u.amount_kobo))}</td><td>${esc(fmtShort(u.due_at))}</td>
+      <td class="small muted" style="white-space:normal">${p.account ? '' : 'Add a bank account first. '}${Number(u.held_orders) ? `${u.held_orders} ${Number(u.held_orders) === 1 ? 'order is' : 'orders are'} held until you decide a refund request.` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing waiting. Earnings from new sales appear here.</p>'}
+    <h3 style="margin-top:1.6rem">Payout history</h3>
+    ${p.payouts.length ? `<div class="card flat table-wrap"><table><thead><tr><th>Event</th><th>Amount</th><th>Orders</th><th>To</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>${p.payouts.map((x) => `<tr><td>${esc(x.title)}</td><td>${nairaZero(x.amount_kobo)}</td><td>${x.order_count}</td><td>${esc(x.account_label)}</td>
+      <td>${payoutBadge(x.status)}${x.status === 'failed' && x.failure_reason ? `<div class="small" style="white-space:normal;max-width:18rem">${esc(x.failure_reason)}</div>` : ''}</td><td>${esc(fmtShort(x.updated_at))}</td>
+      <td>${x.status === 'failed' ? `<button class="btn sm" data-act="retry-payout" data-id="${x.id}">Retry</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No payouts yet. Your first one is sent after your first event.</p>'}`;
 }
 
 function picsPanel(e) {
@@ -131,21 +227,24 @@ function ordersPanel(e) {
   const requestBadge = (o) => o.request_status === 'pending' ? '<br><span class="badge warn">Refund requested</span>' : o.request_status === 'declined' ? '<br><span class="badge">Request declined</span>' : '';
   const reason = (o) => o.request_status === 'pending' ? `<div class="small" style="white-space:normal;max-width:15rem">“${esc(o.request_reason || 'No reason given')}”</div>` : '';
   return `<div class="card flat" style="margin-top:1rem"><h3>Orders and refunds</h3><p class="muted small">Buyers can refund themselves until the cutoff you set. After that they send a request, which appears here for you to approve or decline.</p>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Buyer</th><th>Ticket</th><th>Qty</th><th>Paid</th><th>Fee</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>
-    ${rows.map((o) => `<tr><td><b>${esc(o.buyer_name)}</b><div class="muted small">${esc(o.buyer_email)}</div>${reason(o)}</td><td>${esc(o.ticket_name)}</td><td>${o.quantity}</td><td>${nairaZero(o.amount_kobo)}</td><td>${nairaZero(o.fee_kobo)}</td><td>${statusBadge(o.status)}${requestBadge(o)}</td><td>${esc(fmtShort(o.refunded_at || o.paid_at))}</td><td>${action(o)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No paid orders yet.</p>'}</div>`;
+    ${rows.map((o) => `<tr><td><b>${esc(o.buyer_name)}</b><div class="muted small">${esc(o.buyer_email)}</div>${reason(o)}</td><td>${esc(o.ticket_name)}${o.discount_code ? `<div class="muted small">Code ${esc(o.discount_code)}</div>` : ''}</td><td>${o.quantity}</td><td>${nairaZero(o.amount_kobo)}</td><td>${nairaZero(o.fee_kobo)}</td><td>${statusBadge(o.status)}${requestBadge(o)}</td><td>${esc(fmtShort(o.refunded_at || o.paid_at))}</td><td>${action(o)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No paid orders yet.</p>'}</div>`;
 }
 
 function eventsTab() {
   if (!events.length) return overview();
   return `<div class="stack">${events.map((e) => {
-    const t = e.totals, attention = Number(t.needs_attention);
-    return `<article class="card"><div class="banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><h2 style="margin:0">${esc(e.title)}</h2><div class="muted small">${esc(fmtDate(e.starts_at))}<br>${esc(e.venue)}</div></div><span class="badge">${esc(e.category)}</span>${e.refunds_allowed ? '' : '<span class="badge bad">No refunds</span>'}</div>
+    const t = e.totals, attention = Number(t.needs_attention), cancelled = Boolean(e.cancelled_at), openOrders = Number(t.open_orders), upcoming = new Date(e.starts_at) > new Date();
+    return `<article class="card"><div class="banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><h2 style="margin:0">${esc(e.title)}</h2><div class="muted small">${esc(fmtDate(e.starts_at))}<br>${esc(e.venue)}</div></div><span class="badge">${esc(e.category)}</span>${e.refunds_allowed ? '' : '<span class="badge bad">No refunds</span>'}${cancelled ? '<span class="badge bad">Cancelled</span>' : ''}</div>
+      ${cancelled ? `<div class="notice warn small">This event was cancelled${e.cancel_reason ? ': ' + esc(e.cancel_reason) : ''}. ${openOrders ? `${openOrders} ${openOrders === 1 ? 'order still needs' : 'orders still need'} refunding. Press Continue refunds.` : 'Every order has been refunded.'}</div>` : ''}
       <div class="pill-row"><div><b>${nairaZero(Number(t.net))}</b><span>Your earnings</span></div><div><b>${nairaZero(Number(t.fees))}</b><span>Platform fees</span></div><div><b>${nairaZero(Number(t.refunded))}</b><span>Refunded</span></div></div>
       <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Price</th><th>Sold</th><th>Checked in</th></tr></thead><tbody>${e.ticketTypes.map((x) => `<tr><td>${esc(x.name)}</td><td>${naira(x.price_kobo)}</td>
         <td><div class="row"><div class="bar"><i style="width:${Math.round(Number(x.issued) / x.capacity * 100)}%"></i></div><span class="small">${x.issued} / ${x.capacity}</span></div></td><td>${x.checked_in}</td></tr>`).join('')}</tbody></table></div>
-      <div class="row" style="margin-top:1rem"><button class="btn sm" data-act="edit" data-ev="${e.id}">Edit event</button><button class="btn secondary sm" data-act="toggle" data-key="pics-${e.id}">Pictures (${e.images.length})</button>
+      <div class="row" style="margin-top:1rem">${cancelled ? '' : `<button class="btn sm" data-act="edit" data-ev="${e.id}">Edit event</button>`}<button class="btn secondary sm" data-act="toggle" data-key="pics-${e.id}">Pictures (${e.images.length})</button>
         <button class="btn secondary sm" data-act="toggle" data-key="orders-${e.id}">Orders and refunds${attention ? ` <span class="badge warn">${attention}</span>` : ''}</button>
-        <a class="btn quiet sm" href="/event.html?id=${e.id}" target="_blank" rel="noopener">View public page</a><button class="btn quiet sm" data-act="copy" data-ev="${e.id}">Copy link</button><button class="btn danger outline sm" data-act="delete" data-ev="${e.id}" style="margin-left:auto">Delete event</button></div>
-      ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}</article>`; }).join('')}</div>`;
+        <button class="btn secondary sm" data-act="toggle" data-key="sales-${e.id}">Sales</button><button class="btn secondary sm" data-act="toggle" data-key="codes-${e.id}">Discount codes</button></div>
+      <div class="row" style="margin-top:.5rem"><a class="btn quiet sm" href="/event.html?id=${e.id}" target="_blank" rel="noopener">View public page</a><button class="btn quiet sm" data-act="copy" data-ev="${e.id}">Copy link</button><button class="btn quiet sm" data-act="export" data-ev="${e.id}">Download guest list (CSV)</button>
+        <span class="row" style="margin-left:auto">${cancelled ? (openOrders ? `<button class="btn sm" data-act="cancel-event" data-ev="${e.id}">Continue refunds</button>` : '') : (upcoming ? `<button class="btn danger outline sm" data-act="cancel-event" data-ev="${e.id}">Cancel event</button>` : '')}<button class="btn danger outline sm" data-act="delete" data-ev="${e.id}">Delete event</button></span></div>
+      ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}${open.has('sales-' + e.id) ? salesPanel(e) : ''}${open.has('codes-' + e.id) ? codesPanel(e) : ''}</article>`; }).join('')}</div>`;
 }
 
 // ---------------------------------------------------------------- create and edit
@@ -244,7 +343,11 @@ async function onClick(e) {
     if (d.act === 'go') { if (d.tab === 'create') editing = null; tab = d.tab; render(); }
     else if (d.act === 'toggle') {
       if (open.has(d.key)) open.delete(d.key);
-      else { open.add(d.key); if (d.key.startsWith('orders-')) { render(); await loadOrders(d.key.slice(7)); } }
+      else {
+        open.add(d.key);
+        const [kind, id] = d.key.split('-'), loader = { orders: loadOrders, sales: loadSales, codes: loadCodes }[kind];
+        if (loader) { render(); await loader(id); }
+      }
       render();
     }
     else if (d.act === 'copy') { await navigator.clipboard.writeText(`${location.origin}/event.html?id=${d.ev}`); toast('Link copied. Share it anywhere.'); }
@@ -272,6 +375,33 @@ async function onClick(e) {
       const { ok } = await confirmDialog({ title: `Delete "${ev.title}"?`, text: 'It disappears from the site and nobody can buy tickets for it any more. Your sales and refund records are kept. This cannot be undone.', confirmLabel: 'Delete event', danger: true });
       if (ok) { await api(`/api/organizer/events/${d.ev}`, null, 'DELETE'); toast('Event deleted.'); await load(); render(); }
     }
+    else if (d.act === 'export') { b.disabled = true; try { await downloadAuthed(`/api/organizer/events/${d.ev}/export.csv`, 'guests.csv'); toast('Guest list downloaded.'); } finally { b.disabled = false; } }
+    else if (d.act === 'cancel-event') {
+      const ev = events.find((x) => x.id === Number(d.ev)), t = ev.totals, again = Boolean(ev.cancelled_at), n = Number(t.open_orders);
+      const { ok, reason } = await confirmDialog(again
+        ? { title: 'Continue refunding?', text: `${n} ${n === 1 ? 'order is' : 'orders are'} still waiting for a refund. We will try again now.`, confirmLabel: 'Continue refunds' }
+        : { title: `Cancel "${ev.title}"?`, text: `Sales stop right away and every paid order is refunded in full (${n} ${n === 1 ? 'order' : 'orders'}, ${nairaZero(Number(t.gross))}). Buyers are emailed. This cannot be undone.`, confirmLabel: 'Cancel event and refund everyone', danger: true, askReason: true });
+      if (!ok) return;
+      b.disabled = true; toast('Refunding. This can take a little while.');
+      const r = await api(`/api/organizer/events/${d.ev}/cancel`, { reason });
+      await load(); render();
+      const said = [again ? '' : 'Event cancelled.', `${r.refunded} refunded.`, r.remaining ? `${r.remaining} still to do: press Continue refunds.` : '', r.failed.length ? `${r.failed.length} could not be refunded yet: try Continue refunds.` : '', r.skipped ? `${r.skipped} skipped (already scanned or paid out).` : ''].filter(Boolean);
+      toast(said.join(' '), r.failed.length || r.remaining ? 'err' : '');
+    }
+    else if (d.act === 'add-code') {
+      const f = document.querySelector(`#code-form-${d.ev}`), when = f.querySelector('.c-exp').value;
+      await api(`/api/organizer/events/${d.ev}/discounts`, { code: f.querySelector('.c-code').value, kind: f.querySelector('.c-kind').value, value: f.querySelector('.c-value').value, maxUses: f.querySelector('.c-max').value, expiresAt: when ? new Date(when).toISOString() : '' });
+      toast('Discount code added.'); await loadCodes(d.ev); render();
+    }
+    else if (d.act === 'toggle-code') { await api(`/api/organizer/events/${d.ev}/discounts/${d.id}/toggle`, { active: d.active === '1' }); await loadCodes(d.ev); render(); }
+    else if (d.act === 'change-account') { $('#account-form').hidden = false; }
+    else if (d.act === 'check-account') {
+      const bankCode = $('#pa-bank').value, accountNumber = $('#pa-number').value.trim();
+      const out = await api('/api/organizer/payout-account/resolve', { bankCode, accountNumber });
+      $('#pa-result').innerHTML = `<div class="notice ok">Account name: <b>${esc(out.accountName)}</b><br><span class="small">Is this your account? Then save it.</span> <button class="btn sm" data-act="save-account" data-bank="${esc(bankCode)}" data-number="${esc(accountNumber)}" style="margin-left:.5rem">Yes, save this account</button></div>`;
+    }
+    else if (d.act === 'save-account') { b.disabled = true; await api('/api/organizer/payout-account', { bankCode: d.bank, accountNumber: d.number }, 'PUT'); toast('Bank account saved.'); await loadPayouts(); setTimeout(loadPayouts, 1500); }
+    else if (d.act === 'retry-payout') { b.disabled = true; const r = await api(`/api/organizer/payouts/${d.id}/retry`, {}); toast(r.status === 'failed' ? 'It failed again: ' + r.failure_reason : 'Payout retried.', r.status === 'failed' ? 'err' : ''); await loadPayouts(); }
     else if (d.act === 'add-type') { $('#types').insertAdjacentHTML('beforeend', typeRow()); }
     else if (d.act === 'rm-type') {
       const row = b.closest('.type-row');

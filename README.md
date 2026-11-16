@@ -16,6 +16,11 @@ Built as a portfolio project to show a complete, realistic system: accounts, pay
 - **Platform fee:** a percentage (and optional flat amount) per paid ticket, paid by the buyer on top or deducted from the organizer.
 - **Tickets:** signed QR codes on a ticket page (printable) and by email.
 - **Manage events:** organizers can edit an event after publishing (details, date, refund policy, ticket prices and numbers, add or remove ticket types) and delete it; a changed date or venue is emailed to everyone who bought tickets.
+- **Cancel an event:** one click stops sales, releases unpaid holds, and refunds every order in full, emailing each buyer. It can be run again to finish any refunds that failed.
+- **Discount codes:** percent-off or fixed-amount codes per event, with a use limit and an expiry; buyers see the new total before paying, and a 100% code makes the order free.
+- **Sales charts and exports:** tickets and earnings per day (last 30 days) for all events or one event, a split by ticket type, and the guest list as a CSV file for Excel.
+- **Automatic payouts:** organizers add a verified bank account; their earnings are sent automatically after the event (Paystack Transfers), with a history, retries and email notices.
+- **Password reset:** an emailed single-use link; resetting ends every login on every device.
 - **Refund policy per event:** instant refunds until a cutoff, or "No refunds, all sales are final".
 - **Accounts:** organizers confirm their email through a link (with a pop-up after sign-up), and the login page has "Remember me".
 - **Emails:** buyers get their tickets and an event link to share; organizers get an email for every sale, refund request and granted refund; buyers hear about refunds and declined requests.
@@ -34,7 +39,7 @@ npm install
 cp .env.example .env        # Windows: copy .env.example .env   then set APP_SECRET
 npm run seed                # demo organizer + 4 events with pictures
 npm start                   # http://localhost:3000
-npm test                    # 33 automated tests
+npm test                    # 54 automated tests
 ```
 
 Demo organizer: `demo@gatepass.dev` / `password123`.
@@ -56,6 +61,17 @@ If your host needs SSL and the string does not say so, set `DATABASE_SSL=true`. 
 2. Pay with Paystack's test cards. After payment the ticket page asks Paystack to verify, so it works on localhost.
 3. To exercise the webhook, expose your server with a tunnel (for example ngrok), set `BASE_URL` to the tunnel address, and add `<BASE_URL>/api/webhooks/paystack` in the Paystack dashboard.
 4. Refunds use Paystack's refund API. Without a key they are simulated.
+
+### Payouts with real money (read this before going live)
+
+Payouts use Paystack Transfers. In practice mode (no Paystack key) they are simulated, so the whole flow can be tried safely. For real transfers:
+
+1. Your Paystack account must have Transfers enabled (this normally needs a verified business).
+2. Turn **off** the OTP requirement for transfers in Paystack settings. Otherwise Paystack waits for a person to approve each transfer; Gatepass reports this clearly and the organizer can retry once it is off.
+3. Keep enough balance in your Paystack account. Buyer payments settle into it on Paystack's schedule; if the balance is short the payout simply waits and tries again.
+4. Make sure the webhook also receives `transfer.success`, `transfer.failed` and `transfer.reversed` (the same webhook address as for payments). If a webhook is missed, the job checks with Paystack after 10 minutes.
+
+Each payout uses a unique reference, so a transfer is never sent twice. Organizers' account numbers are never stored: Paystack holds the full number and Gatepass keeps only the bank, the account name and the last 4 digits. The payout job runs every minute while the server is awake; on a free host that sleeps, point a free uptime pinger at `/api/health` so payouts are not delayed. **Live transfers could not be tested against a real Paystack account while building this, so run a small test payout in Paystack test mode first.**
 
 ### Send real emails
 
@@ -94,6 +110,16 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 **Email confirmation and "Remember me".** With an email service set up, a new organizer account cannot log in until the emailed link is used (the link is a signed, single-purpose token that expires after 48 hours and cannot be used as a login). Without an email service, accounts work straight away so local testing needs no setup. "Remember me" keeps the login for 30 days in the browser's long-term storage; without it the login lasts one day and is forgotten when the browser closes.
 
+**Cancelling an event.** It marks the event cancelled first (so nothing new can be bought), releases unpaid holds, then refunds each order with the same three-step refund as before. A payment that arrives after the cancellation is never turned into tickets: the order is flagged for refund. The refund loop stops at a time budget and can be run again, and it only touches what is unfinished. Orders already scanned or already paid out are skipped and reported.
+
+**Discount codes.** A code is claimed with one atomic statement (`used_count < max_uses`), so the last use goes to exactly one buyer even when many race for it, and an unpaid order that expires gives its use back. The discount comes off each ticket and the platform fee is worked out on the discounted price, so the organizer carries the discount. Prices shown to the buyer come from the server (`/api/quote`), so the total always matches checkout.
+
+**Charts and exports.** Charts are plain SVG built in the browser, with the data grouped by day in Lagos time on the server. CSV cells that start with `=`, `+`, `-` or `@` get a leading apostrophe, so a buyer cannot plant a spreadsheet formula in the organizer's guest list, and the file starts with a byte-order mark so Excel reads the ₦ sign correctly.
+
+**Payouts.** Earnings (`orders.payout_kobo`) are claimed per event with one locked query that sets `payout_id` on each order, so an order can only ever be in one payout, even with two servers running. Orders with a refund request waiting are held back. A transfer whose result is unclear (network drop, Paystack error) stays `pending` and is retried with the same reference, which Paystack never pays twice; a clear rejection becomes `failed` and the organizer retries with a new reference. After a payout, refunding those orders from Gatepass is blocked, because the money has left.
+
+**Sessions and password reset.** A reset link carries a fingerprint of the current password hash, so it works once. Resetting also bumps a per-user session version that every login token is checked against, which ends all existing logins immediately.
+
 **Platform fee.** Per ticket: `round(price x percent) + flat`. Each order stores the subtotal, fee, amount charged and organizer payout, so reports never have to recompute history when rates change. With `FEE_PAYER=buyer` the fee is added on top; with `organizer` it is deducted from the payout.
 
 **Pictures in the database.** Stored as `BYTEA`, so they survive hosts with temporary disks. The browser shrinks photos to at most 1600 px wide before upload; the server checks the real file signature (not just the declared type), limits the size, and serves them with long cache headers.
@@ -112,6 +138,9 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 |---|---|---|
 | POST | `/api/auth/register`, `/api/auth/login` | Accounts (login accepts `remember`) |
 | POST | `/api/auth/verify`, `/api/auth/resend` | Confirm an email address, send the link again |
+| POST | `/api/auth/forgot`, `/api/auth/reset` | Password reset by email |
+| GET | `/api/health` | Health check for uptime pingers |
+| POST | `/api/quote` | Price for a ticket and quantity, with an optional discount code |
 | GET | `/api/events?q=&category=&when=&price=&sort=` | Search and browse |
 | GET | `/api/events/:id`, `/api/images/:id` | Event detail, pictures |
 | POST | `/api/checkout` | Reserve tickets and start payment |
@@ -127,6 +156,13 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | GET | `/api/organizer/events/:id/orders` | Orders for one event (auth) |
 | POST | `/api/organizer/orders/:reference/refund` | Organizer refund (auth) |
 | POST | `/api/organizer/orders/:reference/refund-request/decide` | Approve or decline a buyer's request (auth) |
+| POST | `/api/organizer/events/:id/cancel` | Cancel an event and refund everyone; call again to finish (auth) |
+| GET, POST | `/api/organizer/events/:id/discounts` | List and add discount codes (auth) |
+| POST | `/api/organizer/events/:id/discounts/:codeId/toggle` | Turn a code on or off (auth) |
+| GET | `/api/organizer/sales?event=&days=` | Sales per day and per ticket type (auth) |
+| GET | `/api/organizer/events/:id/export.csv` | Guest list as a CSV file (auth) |
+| GET, PUT | `/api/organizer/payouts`, `/api/organizer/payout-account` | Payout overview, save the bank account (auth) |
+| POST | `/api/organizer/payout-account/resolve`, `/api/organizer/payouts/:id/retry` | Check an account name, retry a failed payout (auth) |
 | POST | `/api/checkin` | Validate and consume a ticket (auth) |
 
 ## Configuration
@@ -139,28 +175,28 @@ Use a host that runs Node (Render, Railway, Fly.io). Set `APP_SECRET`, `BASE_URL
 
 ## Known limits and next steps
 
-- Refund requests that Paystack settles later are treated as done once Paystack accepts them; add a refund webhook to track final settlement.
-- Organizer payouts are not automated. Earnings are tracked, and Paystack subaccounts or transfers can pay organizers out.
-- Add email verification, password reset and two-factor login for organizers.
-- Add event editing and cancelling (cancelling could refund every order automatically).
-- Move pictures to object storage (S3 or similar) if galleries grow large, and add a job queue for emails when running several servers.
+- Live Paystack transfers (payouts) and refunds were built to Paystack's documentation but could not be tested against a real account here. Run test-mode payments, a refund and a small payout before relying on them.
+- Refunds that Paystack settles later are treated as done once Paystack accepts them; add a refund webhook to track final settlement.
+- One payout is made per event, after the delay. Earnings from sales made after that point go out in a later payout.
+- Add two-factor login for organizers, and a per-code usage report.
+- Move pictures to object storage (S3 or similar) if galleries grow large, and add a job queue for emails and payouts when running several servers.
 
 ## Project layout
 
 ```
 server.js            API routes
 src/db.js            PostgreSQL layer (pg or PGlite) and schema
-src/orders.js        reservation, expiry, fulfilment, refunds
+src/orders.js        reservation, expiry, fulfilment, refunds, discount codes, cancellation
+src/payouts.js       bank accounts, payout claiming, sending and tracking
 src/fees.js          platform fee maths
-src/payments.js      Paystack and practice checkout
+src/payments.js      Paystack (payments, refunds, transfers) and practice mode
 src/tickets.js       signed codes and QR images
 src/images.js        picture validation
 src/ratelimit.js     rate limiters
-src/auth.js          passwords and login tokens
-src/mailer.js        ticket and refund emails
-public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation
+src/auth.js          passwords, login tokens, session versions
+src/mailer.js        all emails
+public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation, password reset
 seed.js, seed-images demo data
-tests/               33 automated tests (database, payments, refunds and requests, editing, deleting, search, pictures, rate limits, email, account confirmation)
-scripts/             send-test-email.js (checks your email settings)
+tests/               54 automated tests
 docs/                architecture and schema diagrams (SVG)
 ```

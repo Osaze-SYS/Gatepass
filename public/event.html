@@ -19,7 +19,7 @@
 
   page.innerHTML = `
     <p><a href="/" class="small">← All events</a></p>
-    <div class="row" style="margin-bottom:.4rem"><span class="badge">${esc(ev.category)}</span>${started ? '<span class="badge warn">Already started</span>' : ''}</div>
+    <div class="row" style="margin-bottom:.4rem"><span class="badge">${esc(ev.category)}</span>${ev.cancelled ? '<span class="badge bad">Cancelled</span>' : started ? '<span class="badge warn">Already started</span>' : ''}</div>
     <h1>${esc(ev.title)}</h1>
     <div class="gallery" id="gallery"></div>
     <div class="layout">
@@ -37,6 +37,8 @@
           <div id="opts">${ev.ticketTypes.map((t, i) => `<label class="opt ${t.remaining ? '' : 'soldout'}"><span><input type="radio" name="type" value="${t.id}" ${t.remaining ? '' : 'disabled'} ${i === (ev.ticketTypes.findIndex((x) => x.remaining)) ? 'checked' : ''}>${esc(t.name)}</span><span class="right">${naira(t.price_kobo)}<br><span class="muted small">${t.remaining ? (t.remaining <= 10 ? 'Only ' + t.remaining + ' left' : 'Available') : 'Sold out'}</span></span></label>`).join('')}</div>
           <div class="row spread" style="margin:.8rem 0"><span id="qlabel" class="small"><b>How many?</b></span>
             <div class="stepper" role="group" aria-labelledby="qlabel"><button type="button" id="minus" aria-label="One fewer">−</button><output id="qty" aria-live="polite">1</output><button type="button" id="plus" aria-label="One more">+</button></div></div>
+          <div class="field" style="margin:.2rem 0 0"><button type="button" class="btn quiet sm" id="code-toggle" style="padding-left:0">Have a discount code?</button>
+            <div id="code-box" hidden><div class="row" style="flex-wrap:nowrap"><input id="code" placeholder="Enter your code" maxlength="40" autocomplete="off" aria-label="Discount code"><button type="button" class="btn secondary" id="apply-code" style="flex:none">Apply</button></div></div><div id="code-msg" role="status" style="margin-top:.4rem"></div></div>
           <div class="sum" id="sum"></div>
           <div class="field" style="margin-top:1rem"><label for="name">Your name</label><input id="name" autocomplete="name" required></div>
           <div class="field"><label for="email">Email for your tickets</label><input id="email" type="email" autocomplete="email" required></div>
@@ -64,22 +66,50 @@
     gal.innerHTML = `<div class="main" style="cursor:default"><div class="ph" style="--h:${(Math.max(0, CATEGORY_LIST.indexOf(ev.category)) * 47 + 215) % 360}"><span>${esc(ev.category)}</span></div></div>`;
   }
 
+  if (ev.cancelled) {
+    document.querySelector('.buy').innerHTML = `<h2>This event was cancelled</h2><p class="muted">${esc(ev.cancel_reason || 'The organizer cancelled this event.')}</p><p class="muted small">Tickets are no longer on sale. Anyone who already bought tickets is refunded automatically.</p><a class="btn secondary block" href="/">Browse other events</a>`;
+    return;
+  }
+
   // Purchase logic
   const form = document.querySelector('#buy'), btn = document.querySelector('#pay'), msg = document.querySelector('#msg');
   let qty = 1;
   const type = () => { const r = form.querySelector('input[name=type]:checked'); return r && ev.ticketTypes.find((t) => t.id === Number(r.value)); };
+  let applied = '', quoteSeq = 0;
+  const codeMsg = document.querySelector('#code-msg');
+  function paint(t, v) {
+    document.querySelector('#sum').innerHTML = `<div><span>${qty} × ${esc(t.name)}</span><span>${naira(v.gross)}</span></div>` +
+      (v.discount ? `<div class="ok-text"><span>Discount (${esc(v.code)})</span><span>−${nairaZero(v.discount)}</span></div>` : '') +
+      (v.fee ? `<div class="muted"><span>Service fee</span><span>${nairaZero(v.fee)}</span></div>` : '') +
+      `<div class="total"><span>Total</span><span>${naira(v.total)}</span></div>`;
+    btn.disabled = false;
+    btn.textContent = v.total === 0 ? 'Get free tickets' : 'Pay ' + nairaZero(v.total);
+  }
   function refresh() {
     const t = type();
     if (!t) { document.querySelector('#sum').innerHTML = ''; btn.disabled = true; btn.textContent = 'Sold out'; return; }
     qty = Math.max(1, Math.min(qty, 10, t.remaining));
     document.querySelector('#qty').textContent = qty;
-    const sub = t.price_kobo * qty, fee = t.fee_kobo * qty, total = sub + fee;
-    document.querySelector('#sum').innerHTML = `<div><span>${qty} × ${esc(t.name)}</span><span>${naira(sub)}</span></div>` +
-      (fee ? `<div class="muted"><span>Service fee</span><span>${nairaZero(fee)}</span></div>` : '') +
-      `<div class="total"><span>Total</span><span>${naira(total)}</span></div>`;
-    btn.disabled = false;
-    btn.textContent = total === 0 ? 'Get free tickets' : 'Pay ' + nairaZero(total);
+    if (applied) return requote();
+    paint(t, { gross: t.price_kobo * qty, discount: 0, fee: t.fee_kobo * qty, total: (t.price_kobo + t.fee_kobo) * qty });
   }
+  // With a code applied, the server works out the price, so the total always matches what checkout will charge.
+  async function requote() {
+    const t = type(), seq = ++quoteSeq;
+    try {
+      const q = await api('/api/quote', { ticketTypeId: t.id, quantity: qty, code: applied });
+      if (seq !== quoteSeq) return;
+      codeMsg.innerHTML = `<p class="notice ok small">Code ${esc(q.code.code)} applied. You save ${nairaZero(q.discount_kobo)}.</p>`;
+      paint(t, { gross: t.price_kobo * qty, discount: q.discount_kobo, fee: q.fee_kobo, total: q.amount_kobo, code: q.code.code });
+    } catch (err) {
+      if (seq !== quoteSeq) return;
+      applied = ''; codeMsg.innerHTML = `<p class="notice err small">${esc(err.message)}</p>`;
+      refresh();
+    }
+  }
+  document.querySelector('#code-toggle').onclick = () => { const box = document.querySelector('#code-box'); box.hidden = !box.hidden; if (!box.hidden) document.querySelector('#code').focus(); };
+  document.querySelector('#apply-code').onclick = () => { applied = document.querySelector('#code').value.trim(); if (!applied) codeMsg.innerHTML = ''; refresh(); };
+  document.querySelector('#code').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); document.querySelector('#apply-code').click(); } });
   document.querySelector('#minus').onclick = () => { qty--; refresh(); };
   document.querySelector('#plus').onclick = () => { qty++; refresh(); };
   form.addEventListener('change', refresh); refresh();
@@ -88,7 +118,7 @@
     const name = document.querySelector('#name').value.trim(), email = document.querySelector('#email').value.trim();
     if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { msg.innerHTML = '<p class="notice err">Enter your name and a valid email so we can send your tickets.</p>'; return; }
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Reserving your tickets…';
-    try { const out = await api('/api/checkout', { ticketTypeId: type().id, quantity: qty, name, email }); location.href = out.url; }
+    try { const out = await api('/api/checkout', { ticketTypeId: type().id, quantity: qty, name, email, code: applied || undefined }); location.href = out.url; }
     catch (err) { msg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; refresh(); }
   });
 })();

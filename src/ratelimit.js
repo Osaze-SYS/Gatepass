@@ -17,6 +17,7 @@ function makeLimiters(overrides = {}) {
     checkout: make('checkout', 'Too many checkout attempts. Please wait a few minutes and try again.'),
     refund: make('refund', 'Too many refund requests. Please try again later.'),
     upload: make('upload', 'Too many uploads. Please try again later.'),
+    quote: make('quote', 'Too many price checks. Please wait a few minutes and try again.'),
     api: make('api', 'Too many requests. Please slow down.'),
   };
 }

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const config = require('./config');
+const db = require('./db');
 
 const b64 = (buf) => Buffer.from(buf).toString('base64url');
 const hmac = (data) => crypto.createHmac('sha256', config.secret).update(data).digest('base64url');
@@ -19,9 +20,10 @@ function verifyPassword(password, stored) {
 // ---- Login tokens: base64url(payload).signature ----
 // purpose 's' = login session, 'v' = email confirmation link. A token only works for its own purpose.
 // "Remember me" keeps a session for 30 days; otherwise it lasts one day (and the browser forgets it when closed).
-function issueToken(userId, remember = false, purpose = 's', ttlMs) {
+// `extra` is stored as x: the session version for logins, a password fingerprint for reset links.
+function issueToken(userId, remember = false, purpose = 's', ttlMs, extra) {
   const ttl = ttlMs || (remember ? 30 * 864e5 : 864e5);
-  const payload = b64(JSON.stringify({ uid: userId, exp: Date.now() + ttl, p: purpose }));
+  const payload = b64(JSON.stringify({ uid: userId, exp: Date.now() + ttl, p: purpose, ...(extra !== undefined ? { x: extra } : {}) }));
   return `${payload}.${hmac(payload)}`;
 }
 function readToken(token, purpose = 's') {
@@ -33,12 +35,19 @@ function readToken(token, purpose = 's') {
   return data.exp > Date.now() && (data.p || 's') === purpose ? data : null;
 }
 
-function requireAuth(req, res, next) {
-  const header = req.get('authorization') || '';
-  const data = readToken(header.replace(/^Bearer /, ''));
-  if (!data) return res.status(401).json({ error: 'Please log in.' });
-  req.userId = data.uid;
-  next();
+// A reset link is single-use because it carries a fingerprint of the password it was issued for.
+const fingerprint = (passwordHash) => hmac('pw:' + passwordHash).slice(0, 16);
+
+// Checks the token and that the account's session version still matches, so resetting a password logs every device out.
+async function requireAuth(req, res, next) {
+  try {
+    const data = readToken((req.get('authorization') || '').replace(/^Bearer /, ''));
+    if (!data) return res.status(401).json({ error: 'Please log in.' });
+    const row = (await db.query('SELECT session_version FROM users WHERE id = $1', [data.uid])).rows[0];
+    if (!row || (data.x ?? 0) !== row.session_version) return res.status(401).json({ error: 'Please log in again.' });
+    req.userId = data.uid;
+    next();
+  } catch (err) { next(err); }
 }
 
-module.exports = { hashPassword, verifyPassword, issueToken, readToken, requireAuth, hmac };
+module.exports = { hashPassword, verifyPassword, issueToken, readToken, requireAuth, fingerprint, hmac };

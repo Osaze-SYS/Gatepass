@@ -63,6 +63,43 @@ async function resizeImage(file, maxWidth = 1600) {
   return canvas.toDataURL('image/jpeg', 0.82);
 }
 
+// A bar chart drawn as plain SVG, so no chart library is needed. points: [{ label, value, tip }]
+function barChart(points, { height = 190, yFormat = String, ariaLabel = 'Chart' } = {}) {
+  const W = 640, H = height, padL = 54, padR = 10, padT = 12, padB = 26;
+  const max = Math.max(1, ...points.map((p) => p.value));
+  const pow = Math.pow(10, Math.floor(Math.log10(max)));
+  const top = [1, 2, 5, 10].map((m) => m * pow).find((v) => v >= max);          // a round number for the top of the chart
+  const innerW = W - padL - padR, innerH = H - padT - padB, bw = innerW / points.length;
+  const y = (v) => padT + innerH - (v / top) * innerH;
+  const grid = [0, 0.5, 1].map((f) => `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(top * f)}" y2="${y(top * f)}"/><text x="${padL - 6}" y="${y(top * f) + 4}" text-anchor="end">${esc(yFormat(top * f))}</text>`).join('');
+  const bars = points.map((p, i) => { const h = p.value > 0 ? Math.max(2, (innerH * p.value) / top) : 0; return `<rect x="${(padL + i * bw + bw * 0.15).toFixed(1)}" y="${(padT + innerH - h).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${h.toFixed(1)}" rx="2"><title>${esc(p.tip)}</title></rect>`; }).join('');
+  const marks = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
+  const labels = marks.map((i) => `<text x="${(padL + i * bw + bw / 2).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle'}">${esc(points[i].label)}</text>`).join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(ariaLabel)}">${grid}${bars}${labels}</svg>`;
+}
+// Fills in the days with no sales so the chart shows the real timeline (dates are Lagos time, UTC+1).
+function dayPoints(perDay, days, valueOf, tipOf) {
+  const byDay = new Map(perDay.map((d) => [d.day, d]));
+  const base = new Date(Date.now() + 3600e3); base.setUTCHours(0, 0, 0, 0);
+  return Array.from({ length: days }, (_, i) => {
+    const d = new Date(base.getTime() - (days - 1 - i) * 864e5), key = d.toISOString().slice(0, 10), row = byDay.get(key);
+    const label = d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+    return { label, value: row ? Number(valueOf(row)) : 0, tip: `${label}: ${tipOf(row ? Number(valueOf(row)) : 0)}` };
+  });
+}
+const compactNaira = (kobo) => { const n = kobo / 100; return '₦' + (n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? +(n / 1e3).toFixed(1) + 'k' : Math.round(n)); };
+
+// Downloads a file that needs the login header (a plain link cannot send it).
+async function downloadAuthed(path, fallbackName) {
+  const res = await fetch(path, { headers: { Authorization: 'Bearer ' + getToken() } });
+  if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'The download failed. Please try again.'); }
+  const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 const ICON = {
   logo: '<svg viewBox="0 0 32 32" aria-hidden="true"><path fill="#1d4ed8" d="M4 8a3 3 0 0 1 3-3h18a3 3 0 0 1 3 3v4.2a3.8 3.8 0 0 0 0 7.6V24a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-4.2a3.8 3.8 0 0 0 0-7.6z"/><path stroke="#fff" stroke-width="2" stroke-dasharray="2 3" d="M20 7v18"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',

@@ -69,3 +69,19 @@ test('declined email tells the buyer their tickets are still valid', async () =>
   assert.strictEqual(calls[0].body.subject, 'About your refund request for Tech Night');
   assert.ok(calls[0].body.htmlContent.includes('still valid') && calls[0].body.htmlContent.includes('Please transfer the ticket'));
 });
+
+test('refund email for a cancelled event says so', async () => {
+  await sendRefundEmail({ to: 'ada@test.dev', name: 'Ada', eventTitle: 'Tech Night', amountKobo: 500000, cancelled: true });
+  assert.strictEqual(calls[0].body.subject, 'Tech Night was cancelled: your refund');
+  assert.ok(calls[0].body.htmlContent.includes('cancelled') && calls[0].body.htmlContent.includes('₦5,000'));
+});
+
+test('payout emails: sent and failed', async () => {
+  const { sendPayoutEmail } = require('../src/mailer');
+  await sendPayoutEmail({ to: 'org@test.dev', name: 'Org', eventTitle: 'Tech Night', amountKobo: 1000000, accountLabel: 'GTBank ••••6789', ok: true, dashboardUrl: 'https://gatepass.example/organizer.html' });
+  assert.strictEqual(calls[0].body.subject, 'Your payout for Tech Night is on its way');
+  assert.ok(calls[0].body.htmlContent.includes('₦10,000') && calls[0].body.htmlContent.includes('GTBank ••••6789'));
+  await sendPayoutEmail({ to: 'org@test.dev', name: 'Org', eventTitle: 'Tech <b>Night</b>', amountKobo: 1000000, accountLabel: 'GTBank ••••6789', ok: false, reason: 'Recipient <invalid>', dashboardUrl: 'https://gatepass.example/organizer.html' });
+  assert.strictEqual(calls[1].body.subject, 'We could not send your payout for Tech <b>Night</b>');
+  assert.ok(calls[1].body.htmlContent.includes('Recipient &lt;invalid&gt;') && calls[1].body.htmlContent.includes('Retry'));
+});

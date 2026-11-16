@@ -15,6 +15,10 @@ module.exports = {
   pgliteDir: process.env.PGLITE_DIR ?? './data/pglite',   // 'memory://' keeps it in RAM (used by tests)
 
   paystackKey: process.env.PAYSTACK_SECRET_KEY || '',
+
+  // Organizer payouts: earnings are sent automatically this many hours after the event starts (so refunds are settled first).
+  payoutsEnabled: process.env.PAYOUTS_ENABLED !== 'false',
+  payoutDelayHours: num(process.env.PAYOUT_DELAY_HOURS, 48),
   reservationMinutes: num(process.env.RESERVATION_MINUTES, 15),
 
   // Platform fee, charged per paid ticket (free tickets carry no fee).
@@ -32,6 +36,7 @@ module.exports = {
     checkout: { windowMs: 10 * 60 * 1000, limit: num(process.env.LIMIT_CHECKOUT, 20) },
     refund: { windowMs: 60 * 60 * 1000, limit: num(process.env.LIMIT_REFUND, 10) },
     upload: { windowMs: 60 * 60 * 1000, limit: num(process.env.LIMIT_UPLOAD, 60) },
+    quote: { windowMs: 10 * 60 * 1000, limit: num(process.env.LIMIT_QUOTE, 60) },       // also slows down anyone guessing discount codes
     api: { windowMs: 60 * 1000, limit: num(process.env.LIMIT_API, 300) },
   },
 

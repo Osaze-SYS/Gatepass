@@ -148,6 +148,54 @@ async function init() {
     ALTER TABLE events ADD COLUMN IF NOT EXISTS refunds_allowed BOOLEAN NOT NULL DEFAULT TRUE;   -- false = "no refunds, all sales are final"
     ALTER TABLE events ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;                          -- soft delete keeps sales and refund history
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE;     -- existing accounts count as confirmed
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0;       -- bumped on password reset: ends every login
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;                        -- cancelled events stop selling and are refunded
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT '';
+
+    CREATE TABLE IF NOT EXISTS discount_codes (
+      id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      code TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('percent','fixed')),     -- percent off each ticket, or a fixed amount (kobo) off each ticket
+      value INTEGER NOT NULL CHECK (value > 0),
+      max_uses INTEGER CHECK (max_uses IS NULL OR max_uses > 0),  -- null = unlimited. One use = one order.
+      used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+      expires_at TIMESTAMPTZ,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (event_id, code)
+    );
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_code_id INTEGER REFERENCES discount_codes(id) ON DELETE SET NULL;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_code TEXT NOT NULL DEFAULT '';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_kobo INTEGER NOT NULL DEFAULT 0;         -- how much the buyer saved on this order
+
+    -- Where an organizer's earnings are sent. Only the last 4 digits are kept; Paystack holds the full number as a "recipient".
+    CREATE TABLE IF NOT EXISTS payout_accounts (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id),
+      bank_code TEXT NOT NULL,
+      bank_name TEXT NOT NULL,
+      account_name TEXT NOT NULL,
+      account_last4 TEXT NOT NULL,
+      recipient_code TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS payouts (
+      id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount_kobo INTEGER NOT NULL CHECK (amount_kobo > 0),
+      order_count INTEGER NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 1,                          -- a new transfer reference is used for each attempt
+      status TEXT NOT NULL CHECK (status IN ('pending','processing','success','failed','reversed')),
+      transfer_code TEXT,
+      failure_reason TEXT NOT NULL DEFAULT '',
+      account_label TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS payout_id INTEGER REFERENCES payouts(id);         -- set once the order's earnings are in a payout
+    CREATE INDEX IF NOT EXISTS idx_orders_payout ON orders(payout_id);
+    CREATE INDEX IF NOT EXISTS idx_payouts_event ON payouts(event_id);
   `);
   return impl;
 }
