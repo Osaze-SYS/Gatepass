@@ -8,7 +8,7 @@ const app = document.querySelector('#app');
 const $ = (s) => document.querySelector(s);
 let meta, events = [], tab = 'overview', picked = [];
 const open = new Set(), ordersCache = {}, salesCache = {}, codesCache = {};
-let payoutData = null, banks = null;
+let payoutData = null, banks = null, showArchived = false;
 
 const feeText = () => `Gatepass charges ${meta.feePercent}% per paid ticket. ${meta.feePayer === 'buyer' ? 'Buyers pay it on top, so you keep your full ticket price.' : 'It is deducted from your payout.'} Free tickets cost nothing.`;
 const statusBadge = (s) => ({ paid: '<span class="badge ok">Paid</span>', refunded: '<span class="badge">Refunded</span>', refund_due: '<span class="badge warn">Needs refund</span>', refund_pending: '<span class="badge warn">Refund pending</span>' }[s] || esc(s));
@@ -134,7 +134,7 @@ function overview() {
       <div class="stat"><b>${nairaZero(sum('gross'))}</b><span>Total paid by buyers</span></div><div class="stat"><b>${nairaZero(sum('fees'))}</b><span>Platform fees</span></div><div class="stat"><b>${nairaZero(sum('refunded'))}</b><span>Refunded</span></div></div>
     <div class="charts"><div class="card"><h3>Tickets sold per day</h3><p class="muted small">Last 30 days</p><div id="chart-tickets"><span class="spinner"></span></div></div>
       <div class="card"><h3>Your earnings per day</h3><p class="muted small">Last 30 days, after fees</p><div id="chart-earnings"></div></div></div>
-    <h2>Your events</h2><div class="stack">${events.slice(0, 5).map((e) => {
+    <h2>Your events</h2><div class="stack">${!events.some((e) => !e.archived_at) ? '<p class="muted">No active events. Your finished events are archived and still count in the numbers above.</p>' : ''}${events.filter((e) => !e.archived_at).slice(0, 5).map((e) => {
       const issued = e.ticketTypes.reduce((a, t) => a + Number(t.issued), 0), cap = e.ticketTypes.reduce((a, t) => a + t.capacity, 0);
       return `<div class="card banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><b>${esc(e.title)}</b><div class="muted small">${esc(fmtShort(e.starts_at))} · ${esc(e.venue)}</div></div>
         <div style="min-width:9rem"><div class="small muted">${issued} of ${cap} sold</div><div class="bar"><i style="width:${cap ? Math.round(issued / cap * 100) : 0}%"></i></div></div></div>`; }).join('')}</div>`;
@@ -230,21 +230,37 @@ function ordersPanel(e) {
     ${rows.map((o) => `<tr><td><b>${esc(o.buyer_name)}</b><div class="muted small">${esc(o.buyer_email)}</div>${reason(o)}</td><td>${esc(o.ticket_name)}${o.discount_code ? `<div class="muted small">Code ${esc(o.discount_code)}</div>` : ''}</td><td>${o.quantity}</td><td>${nairaZero(o.amount_kobo)}</td><td>${nairaZero(o.fee_kobo)}</td><td>${statusBadge(o.status)}${requestBadge(o)}</td><td>${esc(fmtShort(o.refunded_at || o.paid_at))}</td><td>${action(o)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No paid orders yet.</p>'}</div>`;
 }
 
+// One event card. What it offers depends on where the event is in its life:
+//   upcoming: edit, discount codes, cancel.   started: archive.   cancelled: continue refunds, then archive.   archived: restore.
+function eventCard(e) {
+  const t = e.totals, attention = Number(t.needs_attention), cancelled = Boolean(e.cancelled_at), archived = Boolean(e.archived_at), openOrders = Number(t.open_orders);
+  const started = new Date(e.starts_at) <= new Date();
+  const editable = !started && !cancelled && !archived;                         // editing and new discount codes only make sense before the event
+  const canArchive = !archived && (started || (cancelled && openOrders === 0));
+  const canDelete = started || cancelled;                                       // an upcoming event has to be cancelled first
+  const mine = `data-ev="${e.id}"`;
+  return `<article class="card"><div class="banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><h2 style="margin:0">${esc(e.title)}</h2><div class="muted small">${esc(fmtDate(e.starts_at))}<br>${esc(e.venue)}</div></div>
+      <span class="badge">${esc(e.category)}</span>${e.refunds_allowed ? '' : '<span class="badge bad">No refunds</span>'}${cancelled ? '<span class="badge bad">Cancelled</span>' : ''}${archived ? '<span class="badge">Archived</span>' : ''}</div>
+    ${cancelled ? `<div class="notice warn small">This event was cancelled${e.cancel_reason ? ': ' + esc(e.cancel_reason) : ''}. ${openOrders ? `${openOrders} ${openOrders === 1 ? 'order still needs' : 'orders still need'} refunding. Press Continue refunds.` : 'Every order has been refunded.'}</div>` : ''}
+    <div class="pill-row"><div><b>${nairaZero(Number(t.net))}</b><span>Your earnings</span></div><div><b>${nairaZero(Number(t.fees))}</b><span>Platform fees</span></div><div><b>${nairaZero(Number(t.refunded))}</b><span>Refunded</span></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Price</th><th>Sold</th><th>Checked in</th></tr></thead><tbody>${e.ticketTypes.map((x) => `<tr><td>${esc(x.name)}</td><td>${naira(x.price_kobo)}</td>
+      <td><div class="row"><div class="bar"><i style="width:${Math.round(Number(x.issued) / x.capacity * 100)}%"></i></div><span class="small">${x.issued} / ${x.capacity}</span></div></td><td>${x.checked_in}</td></tr>`).join('')}</tbody></table></div>
+    <div class="row" style="margin-top:1rem">${editable ? `<button class="btn sm" data-act="edit" ${mine}>Edit event</button>` : ''}${archived ? '' : `<button class="btn secondary sm" data-act="toggle" data-key="pics-${e.id}">Pictures (${e.images.length})</button>`}
+      <button class="btn secondary sm" data-act="toggle" data-key="orders-${e.id}">Orders and refunds${attention ? ` <span class="badge warn">${attention}</span>` : ''}</button>
+      <button class="btn secondary sm" data-act="toggle" data-key="sales-${e.id}">Sales</button>${editable ? `<button class="btn secondary sm" data-act="toggle" data-key="codes-${e.id}">Discount codes</button>` : ''}</div>
+    <div class="row" style="margin-top:.5rem"><a class="btn quiet sm" href="/event.html?id=${e.id}" target="_blank" rel="noopener">View public page</a><button class="btn quiet sm" data-act="copy" ${mine}>Copy link</button><button class="btn quiet sm" data-act="export" ${mine}>Download guest list (CSV)</button>
+      <span class="row" style="margin-left:auto">${archived ? `<button class="btn sm" data-act="unarchive" ${mine}>Restore</button>`
+        : `${cancelled ? (openOrders ? `<button class="btn sm" data-act="cancel-event" ${mine}>Continue refunds</button>` : '') : (!started ? `<button class="btn danger outline sm" data-act="cancel-event" ${mine}>Cancel event</button>` : '')}${canArchive ? `<button class="btn secondary sm" data-act="archive" ${mine}>Archive</button>` : ''}`}${canDelete ? `<button class="btn danger outline sm" data-act="delete" ${mine}>Delete event</button>` : ''}</span></div>
+    ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}${open.has('sales-' + e.id) ? salesPanel(e) : ''}${open.has('codes-' + e.id) ? codesPanel(e) : ''}</article>`;
+}
+
 function eventsTab() {
   if (!events.length) return overview();
-  return `<div class="stack">${events.map((e) => {
-    const t = e.totals, attention = Number(t.needs_attention), cancelled = Boolean(e.cancelled_at), openOrders = Number(t.open_orders), upcoming = new Date(e.starts_at) > new Date();
-    return `<article class="card"><div class="banner"><div class="thumb">${cover(e.images[0], e.category, e.title)}</div><div class="grow"><h2 style="margin:0">${esc(e.title)}</h2><div class="muted small">${esc(fmtDate(e.starts_at))}<br>${esc(e.venue)}</div></div><span class="badge">${esc(e.category)}</span>${e.refunds_allowed ? '' : '<span class="badge bad">No refunds</span>'}${cancelled ? '<span class="badge bad">Cancelled</span>' : ''}</div>
-      ${cancelled ? `<div class="notice warn small">This event was cancelled${e.cancel_reason ? ': ' + esc(e.cancel_reason) : ''}. ${openOrders ? `${openOrders} ${openOrders === 1 ? 'order still needs' : 'orders still need'} refunding. Press Continue refunds.` : 'Every order has been refunded.'}</div>` : ''}
-      <div class="pill-row"><div><b>${nairaZero(Number(t.net))}</b><span>Your earnings</span></div><div><b>${nairaZero(Number(t.fees))}</b><span>Platform fees</span></div><div><b>${nairaZero(Number(t.refunded))}</b><span>Refunded</span></div></div>
-      <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Price</th><th>Sold</th><th>Checked in</th></tr></thead><tbody>${e.ticketTypes.map((x) => `<tr><td>${esc(x.name)}</td><td>${naira(x.price_kobo)}</td>
-        <td><div class="row"><div class="bar"><i style="width:${Math.round(Number(x.issued) / x.capacity * 100)}%"></i></div><span class="small">${x.issued} / ${x.capacity}</span></div></td><td>${x.checked_in}</td></tr>`).join('')}</tbody></table></div>
-      <div class="row" style="margin-top:1rem">${cancelled ? '' : `<button class="btn sm" data-act="edit" data-ev="${e.id}">Edit event</button>`}<button class="btn secondary sm" data-act="toggle" data-key="pics-${e.id}">Pictures (${e.images.length})</button>
-        <button class="btn secondary sm" data-act="toggle" data-key="orders-${e.id}">Orders and refunds${attention ? ` <span class="badge warn">${attention}</span>` : ''}</button>
-        <button class="btn secondary sm" data-act="toggle" data-key="sales-${e.id}">Sales</button><button class="btn secondary sm" data-act="toggle" data-key="codes-${e.id}">Discount codes</button></div>
-      <div class="row" style="margin-top:.5rem"><a class="btn quiet sm" href="/event.html?id=${e.id}" target="_blank" rel="noopener">View public page</a><button class="btn quiet sm" data-act="copy" data-ev="${e.id}">Copy link</button><button class="btn quiet sm" data-act="export" data-ev="${e.id}">Download guest list (CSV)</button>
-        <span class="row" style="margin-left:auto">${cancelled ? (openOrders ? `<button class="btn sm" data-act="cancel-event" data-ev="${e.id}">Continue refunds</button>` : '') : (upcoming ? `<button class="btn danger outline sm" data-act="cancel-event" data-ev="${e.id}">Cancel event</button>` : '')}<button class="btn danger outline sm" data-act="delete" data-ev="${e.id}">Delete event</button></span></div>
-      ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}${open.has('sales-' + e.id) ? salesPanel(e) : ''}${open.has('codes-' + e.id) ? codesPanel(e) : ''}</article>`; }).join('')}</div>`;
+  const active = events.filter((e) => !e.archived_at), archived = events.filter((e) => e.archived_at);
+  const show = showArchived || archived.some((e) => Number(e.totals.needs_attention) > 0);     // never leave something that needs attention hidden
+  return `<div class="stack">${active.length ? active.map(eventCard).join('') : '<div class="card empty"><h3>No active events</h3><p>Your finished events are in the archive below. Create an event to start selling again.</p></div>'}</div>
+    ${archived.length ? `<div style="margin-top:1.6rem"><p class="muted small">Archived events are tucked away but still count in your totals, charts and payouts.</p><button class="btn secondary" data-act="toggle-archived">${show ? 'Hide' : 'Show'} archived events (${archived.length})</button>
+      ${show ? `<div class="stack" style="margin-top:1rem">${archived.map(eventCard).join('')}</div>` : ''}</div>` : ''}`;
 }
 
 // ---------------------------------------------------------------- create and edit
@@ -402,6 +418,9 @@ async function onClick(e) {
     }
     else if (d.act === 'save-account') { b.disabled = true; await api('/api/organizer/payout-account', { bankCode: d.bank, accountNumber: d.number }, 'PUT'); toast('Bank account saved.'); await loadPayouts(); setTimeout(loadPayouts, 1500); }
     else if (d.act === 'retry-payout') { b.disabled = true; const r = await api(`/api/organizer/payouts/${d.id}/retry`, {}); toast(r.status === 'failed' ? 'It failed again: ' + r.failure_reason : 'Payout retried.', r.status === 'failed' ? 'err' : ''); await loadPayouts(); }
+    else if (d.act === 'archive') { await api(`/api/organizer/events/${d.ev}/archive`, {}); toast('Event archived. It still counts in your totals and payouts.'); await load(); render(); }
+    else if (d.act === 'unarchive') { await api(`/api/organizer/events/${d.ev}/unarchive`, {}); toast('Event restored.'); await load(); render(); }
+    else if (d.act === 'toggle-archived') { showArchived = !showArchived; render(); }
     else if (d.act === 'add-type') { $('#types').insertAdjacentHTML('beforeend', typeRow()); }
     else if (d.act === 'rm-type') {
       const row = b.closest('.type-row');

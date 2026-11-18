@@ -15,7 +15,8 @@ Built as a portfolio project to show a complete, realistic system: accounts, pay
 - **Checkout:** pay with Paystack (or the practice checkout), tickets held for 15 minutes, free events skip payment.
 - **Platform fee:** a percentage (and optional flat amount) per paid ticket, paid by the buyer on top or deducted from the organizer.
 - **Tickets:** signed QR codes on a ticket page (printable) and by email.
-- **Manage events:** organizers can edit an event after publishing (details, date, refund policy, ticket prices and numbers, add or remove ticket types) and delete it; a changed date or venue is emailed to everyone who bought tickets.
+- **Manage events:** organizers can edit an event until it starts (details, date, refund policy, ticket prices and numbers, add or remove ticket types) and delete it once it has started or been cancelled; a changed date or venue is emailed to everyone who bought tickets.
+- **Archive:** finished events can be tucked into a collapsed Archived section and restored with one click. They still count in totals, charts, guest lists and payouts. Past events no longer offer editing or new discount codes.
 - **Cancel an event:** one click stops sales, releases unpaid holds, and refunds every order in full, emailing each buyer. It can be run again to finish any refunds that failed.
 - **Discount codes:** percent-off or fixed-amount codes per event, with a use limit and an expiry; buyers see the new total before paying, and a 100% code makes the order free.
 - **Sales charts and exports:** tickets and earnings per day (last 30 days) for all events or one event, a split by ticket type, and the guest list as a CSV file for Excel.
@@ -39,7 +40,7 @@ npm install
 cp .env.example .env        # Windows: copy .env.example .env   then set APP_SECRET
 npm run seed                # demo organizer + 4 events with pictures
 npm start                   # http://localhost:3000
-npm test                    # 54 automated tests
+npm test                    # 60 automated tests
 ```
 
 Demo organizer: `demo@gatepass.dev` / `password123`.
@@ -106,7 +107,7 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 **Refund requests.** Instant refunds stop at the organizer's cutoff. After that, and until the event starts, the buyer (who must give the email used at checkout) can send one request per order. It appears at the top of the organizer's orders list, and the organizer is emailed. Approving runs the same three-step refund as above; declining leaves the tickets valid and emails the buyer the organizer's note. Any other refund of the same order, such as the organizer refunding directly, settles the waiting request automatically.
 
-**Editing and deleting events.** Editing keeps each ticket type's id, so earlier orders stay linked and keep the price they were bought at. The number of tickets cannot go below what is sold or held, and a ticket type that has orders cannot be removed. Deleting hides the event instead of erasing it, so sales and refund history stay intact; an upcoming event with live orders must have them refunded first.
+**Editing and deleting events.** Editing keeps each ticket type's id, so earlier orders stay linked and keep the price they were bought at. The number of tickets cannot go below what is sold or held, and a ticket type that has orders cannot be removed. Deleting hides the event instead of erasing it, so sales and refund history stay intact; an upcoming event must be cancelled first (which refunds everyone), and a cancelled event can only be deleted once every order is refunded.
 
 **Email confirmation and "Remember me".** With an email service set up, a new organizer account cannot log in until the emailed link is used (the link is a signed, single-purpose token that expires after 48 hours and cannot be used as a login). Without an email service, accounts work straight away so local testing needs no setup. "Remember me" keeps the login for 30 days in the browser's long-term storage; without it the login lasts one day and is forgotten when the browser closes.
 
@@ -119,6 +120,8 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 **Payouts.** Earnings (`orders.payout_kobo`) are claimed per event with one locked query that sets `payout_id` on each order, so an order can only ever be in one payout, even with two servers running. Orders with a refund request waiting are held back. A transfer whose result is unclear (network drop, Paystack error) stays `pending` and is retried with the same reference, which Paystack never pays twice; a clear rejection becomes `failed` and the organizer retries with a new reference. After a payout, refunding those orders from Gatepass is blocked, because the money has left.
 
 **Sessions and password reset.** A reset link carries a fingerprint of the current password hash, so it works once. Resetting also bumps a per-user session version that every login token is checked against, which ends all existing logins immediately.
+
+**Archiving versus deleting.** Delete hides an event for good: it leaves the totals, charts and guest list. Archive only moves a finished event into a collapsed section and takes it off public browsing, so every number, export and payout stays intact, and it can be restored. An event can be archived once it has started (or been cancelled and fully refunded), and never while a refund decision is waiting, so nothing that needs attention can be hidden. If something needing attention appears on an archived event later, the archive section opens by itself.
 
 **Platform fee.** Per ticket: `round(price x percent) + flat`. Each order stores the subtotal, fee, amount charged and organizer payout, so reports never have to recompute history when rates change. With `FEE_PAYER=buyer` the fee is added on top; with `organizer` it is deducted from the payout.
 
@@ -157,6 +160,7 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | POST | `/api/organizer/orders/:reference/refund` | Organizer refund (auth) |
 | POST | `/api/organizer/orders/:reference/refund-request/decide` | Approve or decline a buyer's request (auth) |
 | POST | `/api/organizer/events/:id/cancel` | Cancel an event and refund everyone; call again to finish (auth) |
+| POST | `/api/organizer/events/:id/archive`, `/unarchive` | Tuck a finished event away, or bring it back (auth) |
 | GET, POST | `/api/organizer/events/:id/discounts` | List and add discount codes (auth) |
 | POST | `/api/organizer/events/:id/discounts/:codeId/toggle` | Turn a code on or off (auth) |
 | GET | `/api/organizer/sales?event=&days=` | Sales per day and per ticket type (auth) |
@@ -197,6 +201,6 @@ src/auth.js          passwords, login tokens, session versions
 src/mailer.js        all emails
 public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation, password reset
 seed.js, seed-images demo data
-tests/               54 automated tests
+tests/               60 automated tests
 docs/                architecture and schema diagrams (SVG)
 ```

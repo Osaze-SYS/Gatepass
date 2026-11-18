@@ -163,7 +163,7 @@ function createApp(opts = {}) {
   // ---------------- Browse and search ----------------
   // Filters: q (text), category, when (week|month), price (free|paid), sort (date|price|newest)
   app.get('/api/events', wrap(async (req, res) => {
-    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'", 'e.deleted_at IS NULL', 'e.cancelled_at IS NULL'], having = [], params = [];
+    const where = ["e.starts_at >= NOW() - INTERVAL '1 day'", 'e.deleted_at IS NULL', 'e.cancelled_at IS NULL', 'e.archived_at IS NULL'], having = [], params = [];
     const add = (v) => { params.push(v); return '$' + params.length; };
     const q = str(req.query.q, 80);
     if (q) {
@@ -338,6 +338,7 @@ function createApp(opts = {}) {
       const ev = (await q('SELECT venue, starts_at, cancelled_at FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0];
       if (!ev) throw httpError(404, 'Event not found.');
       if (ev.cancelled_at) throw httpError(409, 'This event was cancelled, so it cannot be edited.');
+      if (new Date(ev.starts_at) <= new Date()) throw httpError(409, 'This event has already started, so it can no longer be edited.');
       const existing = (await q('SELECT t.id, t.name, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS orders FROM ticket_types t WHERE t.event_id = $1 FOR UPDATE', [id])).rows;
       const byId = new Map(existing.map((t) => [t.id, t]));
       const keep = new Set();
@@ -369,6 +370,8 @@ function createApp(opts = {}) {
   // An upcoming event with live orders must have them refunded first.
   app.delete('/api/organizer/events/:id', requireAuth, wrap(async (req, res) => {
     const id = await ownEvent(req.params.id, req.userId);
+    const ev = (await db.query('SELECT starts_at, cancelled_at FROM events WHERE id = $1', [id])).rows[0];
+    if (!ev.cancelled_at && new Date(ev.starts_at) > new Date()) throw httpError(409, 'An upcoming event cannot be deleted. Cancel it first (every buyer is refunded), then you can delete it.');
     await expirePendingOrders();
     const n = (await db.query(
       `SELECT COUNT(*) AS n FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id JOIN events e ON e.id = t.event_id
@@ -408,7 +411,7 @@ function createApp(opts = {}) {
 
   app.get('/api/organizer/events', requireAuth, wrap(async (req, res) => {
     await expirePendingOrders();
-    const events = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed, cancelled_at, cancel_reason FROM events WHERE organizer_id = $1 AND deleted_at IS NULL ORDER BY starts_at DESC', [req.userId])).rows;
+    const events = (await db.query('SELECT id, title, description, venue, category, starts_at, refund_cutoff_hours, refunds_allowed, cancelled_at, cancel_reason, archived_at FROM events WHERE organizer_id = $1 AND deleted_at IS NULL ORDER BY starts_at DESC', [req.userId])).rows;
     await Promise.all(events.map(async (e) => {
       e.ticketTypes = (await db.query(
         `SELECT t.id, t.name, t.price_kobo, t.capacity, t.sold, (SELECT COUNT(*) FROM orders o WHERE o.ticket_type_id = t.id) AS order_count,
@@ -475,6 +478,30 @@ function createApp(opts = {}) {
     res.json(await payouts.retryPayout({ userId: req.userId, payoutId: intId(req.params.id) }));
   }));
 
+  // Archive: tuck a finished event away. It keeps counting in totals, charts, guest lists and payouts, and can be restored.
+  app.post('/api/organizer/events/:id/archive', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    const ev = (await db.query('SELECT starts_at, cancelled_at, archived_at FROM events WHERE id = $1', [id])).rows[0];
+    if (ev.archived_at) return res.json({ ok: true });
+    if (!ev.cancelled_at && new Date(ev.starts_at) > new Date()) throw httpError(409, 'Only events that have already started, or been cancelled, can be archived.');
+    const open = (await db.query(
+      `SELECT COUNT(*) FILTER (WHERE o.status IN ('refund_due', 'refund_pending')) AS refunds,
+              COUNT(*) FILTER (WHERE o.status = 'paid' AND EXISTS (SELECT 1 FROM refund_requests rr WHERE rr.order_id = o.id AND rr.status = 'pending')) AS requests,
+              COUNT(*) FILTER (WHERE o.status = 'paid') AS paid
+       FROM orders o JOIN ticket_types t ON t.id = o.ticket_type_id WHERE t.event_id = $1`, [id])).rows[0];
+    const waiting = open.refunds + open.requests;
+    if (waiting > 0) throw httpError(409, `Settle the refunds first: ${waiting} ${waiting === 1 ? 'order needs' : 'orders need'} a refund decision.`);     // so nothing needing attention gets hidden
+    if (ev.cancelled_at && open.paid > 0) throw httpError(409, 'This cancelled event still has orders to refund. Press Continue refunds first.');
+    await db.query('UPDATE events SET archived_at = NOW() WHERE id = $1 AND archived_at IS NULL', [id]);
+    res.json({ ok: true });
+  }));
+
+  app.post('/api/organizer/events/:id/unarchive', requireAuth, wrap(async (req, res) => {
+    const id = await ownEvent(req.params.id, req.userId);
+    await db.query('UPDATE events SET archived_at = NULL WHERE id = $1', [id]);
+    res.json({ ok: true });
+  }));
+
   // Cancel an event and refund everyone. Call it again to finish if some refunds are left (it only touches what is unfinished).
   app.post('/api/organizer/events/:id/cancel', requireAuth, limit.refund, wrap(async (req, res) => {
     const result = await cancelEvent({ eventId: intId(req.params.id), organizerId: req.userId, reason: str(req.body.reason, 300), budgetMs: opts.cancelBudgetMs });
@@ -521,6 +548,8 @@ function createApp(opts = {}) {
 
   app.post('/api/organizer/events/:id/discounts', requireAuth, wrap(async (req, res) => {
     const id = await ownEvent(req.params.id, req.userId);
+    const when = (await db.query('SELECT starts_at, cancelled_at FROM events WHERE id = $1', [id])).rows[0];
+    if (when.cancelled_at || new Date(when.starts_at) <= new Date()) throw httpError(409, 'This event has already started or was cancelled, so new discount codes cannot be added.');
     const code = normalizeCode(req.body.code);
     if (!/^[A-Z0-9_-]{3,20}$/.test(code)) throw httpError(400, 'Use 3 to 20 letters, numbers, dashes or underscores for the code.');
     const kind = req.body.kind;

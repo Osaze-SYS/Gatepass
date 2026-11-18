@@ -78,10 +78,22 @@ test('refunds that fail are reported, leave the order intact, and succeed when r
     const first = await cancel(eventId);
     assert.deepStrictEqual([first.body.refunded, first.body.failed.length], [0, 2]);
     assert.deepStrictEqual([await statusOf(refs[0]), await statusOf(refs[1])], ['paid', 'paid']);               // nothing was lost
+    const blocked = await t.api(`/api/organizer/events/${eventId}`, null, org, 'DELETE');                      // cancelled, but its orders are not refunded yet
+    assert.strictEqual(blocked.status, 409);
+    assert.match(blocked.body.error, /active orders/);
     assert.strictEqual((await t.api(`/api/orders/${refs[0]}`)).body.tickets.length, 1);
   } finally { payments.refund = original; }
   const second = await cancel(eventId);
   assert.deepStrictEqual([second.body.refunded, second.body.failed.length], [2, 0]);
+  assert.strictEqual((await t.api(`/api/organizer/events/${eventId}`, null, org, 'DELETE')).status, 200);        // everything refunded, so it can go
+});
+
+test('an upcoming event with no sales still has to be cancelled before it can be deleted', async () => {
+  const { eventId } = await t.makeEvent(org, { days: 9 });
+  const del = () => t.api(`/api/organizer/events/${eventId}`, null, org, 'DELETE');
+  assert.strictEqual((await del()).status, 409);
+  assert.strictEqual((await cancel(eventId)).status, 200);                                                       // nothing to refund
+  assert.strictEqual((await del()).status, 200);
 });
 
 test('a long cancellation stops at its time budget and can be continued', async () => {

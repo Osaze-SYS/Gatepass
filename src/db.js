@@ -151,6 +151,7 @@ async function init() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0;       -- bumped on password reset: ends every login
     ALTER TABLE events ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;                        -- cancelled events stop selling and are refunded
     ALTER TABLE events ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT '';
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;                         -- archived events leave the main list but keep counting in totals
 
     CREATE TABLE IF NOT EXISTS discount_codes (
       id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

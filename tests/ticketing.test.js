@@ -307,8 +307,10 @@ test('deleting an event hides it, and live orders must be refunded first', async
   const ref = await buyAndPay(typeId, 1, 32);
   const del = (id, auth = token) => api(`/api/organizer/events/${id}`, null, auth, 'DELETE');
   assert.strictEqual((await del(eventId, token2)).status, 404);
-  assert.strictEqual((await del(eventId)).status, 409);                                          // still has a paid order
-  assert.strictEqual((await api(`/api/organizer/orders/${ref}/refund`, {}, token)).status, 200);
+  const early = await del(eventId);                                                              // upcoming events must be cancelled first
+  assert.strictEqual(early.status, 409);
+  assert.match(early.body.error, /Cancel it first/);
+  assert.strictEqual((await api(`/api/organizer/events/${eventId}/cancel`, {}, token)).status, 200);   // refunds the paid order
   assert.strictEqual((await del(eventId)).status, 200);
   assert.strictEqual((await api(`/api/events/${eventId}`)).status, 404);
   assert.deepStrictEqual((await api('/api/events?q=Doomed')).body, []);
