@@ -4,9 +4,11 @@ const fs = require('fs');
 const config = require('./src/config');
 const db = require('./src/db');
 const payments = require('./src/payments');
-const { hashPassword, verifyPassword, issueToken, readToken, requireAuth, fingerprint } = require('./src/auth');
+const { hashPassword, verifyPassword, issueToken, readToken, requireAuth, requireTeam, fingerprint } = require('./src/auth');
 const mailer = require('./src/mailer');
 const payouts = require('./src/payouts');
+const team = require('./src/team');
+const broadcast = require('./src/broadcast');
 const { signCode, parseCode, qrDataUrl } = require('./src/tickets');
 const { createOrder, quoteOrder, normalizeCode, cancelEvent, expirePendingOrders, fulfillOrder, refundOrder, requestRefund, decideRefundRequest, notifyBuyersOfEventChange, refundWindow, httpError } = require('./src/orders');
 const { buyerFeePerTicket } = require('./src/fees');
@@ -103,6 +105,7 @@ function createApp(opts = {}) {
     const name = str(req.body.name, 80), email = str(req.body.email).toLowerCase(), password = str(req.body.password, 200);
     if (!name || !EMAIL.test(email) || password.length < 8) throw httpError(400, 'Enter your name, a valid email and a password of at least 8 characters.');
     if ((await db.query('SELECT 1 FROM users WHERE email = $1', [email])).rows.length) throw httpError(409, 'An account with this email already exists. Try logging in.');
+    if ((await db.query('SELECT 1 FROM team_members WHERE email = $1 AND accepted_at IS NULL', [email])).rows.length) throw httpError(409, 'This email was invited to join a team. Open the invitation email to accept it.');
     const needsConfirm = mailer.mode !== 'console';
     const { rows } = await db.query('INSERT INTO users (name, email, password_hash, email_verified) VALUES ($1, $2, $3, $4) RETURNING id', [name, email, hashPassword(password), !needsConfirm]);
     const userId = rows[0].id;
@@ -121,7 +124,7 @@ function createApp(opts = {}) {
     const user = (await db.query('SELECT * FROM users WHERE email = $1', [str(req.body.email).toLowerCase()])).rows[0];
     if (!user || !verifyPassword(str(req.body.password, 200), user.password_hash)) throw httpError(401, 'Email or password is incorrect.');
     if (!user.email_verified) return res.status(403).json({ error: 'Please confirm your email first. We sent you a link when you signed up.', needsVerification: true, email: user.email });
-    res.json({ token: issueToken(user.id, req.body.remember === true, 's', undefined, user.session_version), name: user.name });   // "remember me" = 30 days, otherwise 1 day
+    res.json({ token: issueToken(user.id, req.body.remember === true, 's', undefined, user.session_version), name: user.name, role: user.role });   // "remember me" = 30 days, otherwise 1 day
   }));
 
   // Always answers the same way, so nobody can use this to find out which emails have accounts.
@@ -151,6 +154,16 @@ function createApp(opts = {}) {
     // New password, every existing login ends, and the email counts as confirmed (they just proved they own it).
     await db.query('UPDATE users SET password_hash = $2, session_version = session_version + 1, email_verified = TRUE WHERE id = $1', [user.id, hashPassword(password)]);
     res.json({ ok: true });
+  }));
+
+  // Team invitations: see the invitation, then accept it by choosing a password.
+  app.get('/api/auth/join-info', limit.auth, wrap(async (req, res) => res.json(await team.joinInfo(str(req.query.token, 800)))));
+  app.post('/api/auth/join', limit.auth, wrap(async (req, res) => res.status(201).json(await team.acceptInvite({ token: str(req.body.token, 800), password: req.body.password }))));
+
+  // Who am I? Used by pages that show different things to organizers and scanners.
+  app.get('/api/me', requireTeam, wrap(async (req, res) => {
+    const me = (await db.query('SELECT u.name, u.role, o.name AS owner_name FROM users u LEFT JOIN users o ON o.id = u.owner_id WHERE u.id = $1', [req.userId])).rows[0];
+    res.json({ name: me.name, role: me.role, ownerName: me.owner_name });
   }));
 
   app.post('/api/auth/verify', limit.auth, wrap(async (req, res) => {
@@ -458,6 +471,22 @@ function createApp(opts = {}) {
     res.json({ ok: true, ...out });
   }));
 
+  // ---- Team members (scanners) ----
+  app.get('/api/organizer/team', requireAuth, wrap(async (req, res) => res.json(await team.listTeam(req.userId))));
+  app.post('/api/organizer/team', requireAuth, limit.upload, wrap(async (req, res) => res.status(201).json(await team.inviteMember({ ownerId: req.userId, name: req.body.name, email: req.body.email }))));
+  app.post('/api/organizer/team/:id/resend', requireAuth, limit.upload, wrap(async (req, res) => res.json(await team.resendInvite({ ownerId: req.userId, memberId: intId(req.params.id) }))));
+  app.delete('/api/organizer/team/:id', requireAuth, wrap(async (req, res) => res.json(await team.removeMember({ ownerId: req.userId, memberId: intId(req.params.id) }))));
+
+  // ---- Messages to ticket holders ----
+  app.get('/api/organizer/events/:id/audience', requireAuth, wrap(async (req, res) => res.json(await broadcast.audienceCounts(await ownEvent(req.params.id, req.userId)))));
+  app.get('/api/organizer/events/:id/messages', requireAuth, wrap(async (req, res) => res.json(await broadcast.history(await ownEvent(req.params.id, req.userId)))));
+  app.post('/api/organizer/events/:id/message', requireAuth, limit.broadcast, wrap(async (req, res) => {
+    const eventId = await ownEvent(req.params.id, req.userId);
+    const me = (await db.query('SELECT id, name, email FROM users WHERE id = $1', [req.userId])).rows[0];
+    const out = await broadcast.sendMessage({ eventId, organizer: me, subject: req.body.subject, body: req.body.body, ticketTypeId: req.body.ticketTypeId ? intId(req.body.ticketTypeId) : null, testOnly: req.body.testOnly === true });
+    res.status(out.test ? 200 : 202).json({ ok: true, ...out });
+  }));
+
   // ---- Payouts: where earnings are sent, and what has been sent ----
   app.get('/api/organizer/payouts', requireAuth, wrap(async (req, res) => res.json(await payouts.payoutOverview(req.userId))));
 
@@ -582,7 +611,7 @@ function createApp(opts = {}) {
   }));
 
   // ---------------- Gate check-in ----------------
-  app.post('/api/checkin', requireAuth, wrap(async (req, res) => {
+  app.post('/api/checkin', requireTeam, wrap(async (req, res) => {
     const id = parseCode(req.body.code);
     if (!id) return res.json({ result: 'invalid', message: 'Not a valid ticket.' });
     const ticket = (await db.query(
@@ -590,7 +619,7 @@ function createApp(opts = {}) {
        FROM tickets k JOIN ticket_types t ON t.id = k.ticket_type_id
        JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = k.order_id WHERE k.id = $1`, [id])).rows[0];
     if (!ticket) return res.json({ result: 'invalid', message: 'Ticket not found.' });
-    if (ticket.organizer_id !== req.userId) return res.json({ result: 'wrong_event', message: 'This ticket is for an event you do not manage.' });
+    if (ticket.organizer_id !== req.ownerId) return res.json({ result: 'wrong_event', message: 'This ticket is for an event you do not manage.' });
     const base = { event: ticket.title, ticketType: ticket.ticket_name, buyer: ticket.buyer_name };
     if (ticket.cancelled_at) return res.json({ result: 'cancelled', message: 'This event was cancelled.', ...base });
     if (ticket.voided_at) return res.json({ result: 'refunded', message: 'This ticket was refunded.', ...base });
@@ -617,6 +646,7 @@ if (require.main === module) {
   db.init().then(() => {
     setInterval(() => {
       expirePendingOrders().catch((e) => console.error(e));
+      broadcast.interruptStale().catch((e) => console.error(e));
       if (config.payoutsEnabled) payouts.runPayouts().catch((e) => console.error('[payout]', e.message));
     }, 60 * 1000).unref();
     createApp().listen(config.port, () => {

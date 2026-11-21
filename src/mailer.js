@@ -35,6 +35,7 @@ async function send(msg) {
       subject: msg.subject,
       htmlContent: msg.html,
     };
+    if (msg.replyTo) payload.replyTo = msg.replyTo;
     // Brevo rejects an empty attachment list ("attachment is missing"), so only send the field when there is something to attach.
     if (msg.attachments && msg.attachments.length) payload.attachment = msg.attachments.map((a) => ({ name: a.filename, content: a.content.toString('base64') }));
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -48,7 +49,7 @@ async function send(msg) {
     }
     return;
   }
-  await transport.sendMail({ from: config.mail.from, to: msg.to, subject: msg.subject, html: msg.html, attachments: msg.attachments });
+  await transport.sendMail({ from: config.mail.from, to: msg.to, subject: msg.subject, html: msg.html, attachments: msg.attachments, replyTo: msg.replyTo ? `${msg.replyTo.name} <${msg.replyTo.email}>` : undefined });
 }
 
 const money = (kobo) => (kobo === 0 ? 'Free' : '₦' + (kobo / 100).toLocaleString('en-NG'));
@@ -133,6 +134,27 @@ async function sendPayoutEmail({ to, name, eventTitle, amountKobo, accountLabel,
   if (mode === 'console') console.log(`[mail] not sent (no email service set up). Payout ${ok ? 'sent' : 'failed'} notice for ${eventTitle}`);
 }
 
+async function sendTeamInviteEmail({ to, name, ownerName, url }) {
+  await send({
+    to, toName: name,
+    subject: `${ownerName} invited you to scan tickets on Gatepass`,
+    html: `<p>Hi ${esc(name)},</p><p><b>${esc(ownerName)}</b> invited you to join their team on Gatepass. You will be able to scan guests in at the gate. You will not see earnings, orders or settings.</p>${button(url, 'Accept the invitation')}<p>The link works for 7 days. If you were not expecting this, you can ignore this email.</p>`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Team invitation link for ${to}: ${url}`);
+}
+
+// A message from an organizer to one of their ticket holders. Replies go straight to the organizer.
+async function sendBroadcastEmail({ to, name, subject, body, organizerName, organizerEmail, eventTitle, ticketUrl }) {
+  await send({
+    to, toName: name,
+    subject,
+    replyTo: { email: organizerEmail, name: organizerName },
+    html: `<p>Hi ${esc(name)},</p><p>${esc(body).replace(/\r?\n/g, '<br>')}</p>${ticketUrl ? button(ticketUrl, 'View your tickets') : ''}
+      <p style="color:#666;font-size:13px">This message is from ${esc(organizerName)}, the organizer of <b>${esc(eventTitle)}</b>, and was sent to people who bought tickets through Gatepass. Reply to this email to reach them.</p>`,
+  });
+  if (mode === 'console') console.log(`[mail] not sent (no email service set up). Message to ticket holder ${to}: ${subject}`);
+}
+
 async function sendSaleEmail({ to, organizerName, buyerName, buyerEmail, eventTitle, ticketName, quantity, amountKobo, payoutKobo, remaining, discountCode, discountKobo, dashboardUrl }) {
   await send({
     to, toName: organizerName,
@@ -172,4 +194,4 @@ async function sendTestEmail(to) {
   });
 }
 
-module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendVerificationEmail, sendPasswordResetEmail, sendPayoutEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail, sendTestEmail, mode };
+module.exports = { sendTicketEmail, sendRefundEmail, sendRefundRequestEmail, sendRefundDeclinedEmail, sendVerificationEmail, sendPasswordResetEmail, sendTeamInviteEmail, sendBroadcastEmail, sendPayoutEmail, sendSaleEmail, sendRefundOrganizerEmail, sendEventUpdateEmail, sendTestEmail, mode };

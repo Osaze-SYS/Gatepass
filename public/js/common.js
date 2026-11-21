@@ -1,3 +1,4 @@
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const naira = (kobo) => (kobo === 0 ? 'Free' : '₦' + (kobo / 100).toLocaleString('en-NG', { maximumFractionDigits: 2 }));
 const nairaZero = (kobo) => '₦' + (kobo / 100).toLocaleString('en-NG', { maximumFractionDigits: 2 });
@@ -7,12 +8,13 @@ const dayParts = (iso) => { const d = new Date(iso); return { day: d.getDate(), 
 // "Remember me" keeps the login in localStorage (it survives closing the browser). Without it the login lives in sessionStorage and is forgotten when the browser closes.
 const getToken = () => sessionStorage.getItem('gp_token') || localStorage.getItem('gp_token');
 const getName = () => sessionStorage.getItem('gp_name') || localStorage.getItem('gp_name') || '';
-const setSession = (token, name, remember) => {
+const getRole = () => sessionStorage.getItem('gp_role') || localStorage.getItem('gp_role') || 'organizer';     // 'scanner' = a team member
+const setSession = (token, name, remember, role) => {
   clearSession();
   const store = remember ? localStorage : sessionStorage;
-  store.setItem('gp_token', token); store.setItem('gp_name', name);
+  store.setItem('gp_token', token); store.setItem('gp_name', name); store.setItem('gp_role', role || 'organizer');
 };
-const clearSession = () => { for (const s of [localStorage, sessionStorage]) { s.removeItem('gp_token'); s.removeItem('gp_name'); } };
+const clearSession = () => { for (const s of [localStorage, sessionStorage]) { s.removeItem('gp_token'); s.removeItem('gp_name'); s.removeItem('gp_role'); } };
 const CATEGORY_LIST = ['Music', 'Tech', 'Business', 'Faith', 'Sports', 'Education', 'Food & Drink', 'Arts', 'Community', 'Other'];
 
 async function api(path, body, method) {
@@ -118,7 +120,8 @@ const ICON = {
       <button class="nav-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="nav">
         <svg class="bars" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         <svg class="x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-      <nav class="nav" id="nav" aria-label="Main">${link('/', 'Browse events')}${getToken() ? link('/organizer.html', 'Dashboard') + link('/scan.html', 'Scan tickets', 'hide-sm') : link('/organizer.html', 'For organizers')}</nav></div>`;
+      <nav class="nav" id="nav" aria-label="Main">${link('/', 'Browse events')}${getToken() ? (getRole() === 'scanner' ? '' : link('/organizer.html', 'Dashboard')) + link('/scan.html', 'Scan tickets', 'hide-sm') + '<a href="#" id="nav-logout">Log out</a>' : link('/organizer.html', 'For organizers')}</nav></div>`;
+    header.querySelector('#nav-logout')?.addEventListener('click', (e) => { e.preventDefault(); clearSession(); location.href = '/'; });
 
     // Mobile menu: opens from the hamburger, closes on a link, Escape, an outside tap, or a wider screen.
     const toggle = header.querySelector('.nav-toggle'), nav = header.querySelector('#nav');

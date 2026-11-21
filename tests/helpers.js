@@ -8,7 +8,7 @@ process.env.APP_SECRET = 'test-secret';
 const db = require('../src/db');
 const { createApp } = require('../server');
 
-const HIGH = { auth: { limit: 1000 }, checkout: { limit: 1000 }, refund: { limit: 1000 }, upload: { limit: 1000 }, quote: { limit: 1000 }, api: { limit: 100000 } };
+const HIGH = { auth: { limit: 1000 }, checkout: { limit: 1000 }, refund: { limit: 1000 }, upload: { limit: 1000 }, quote: { limit: 1000 }, broadcast: { limit: 1000 }, api: { limit: 100000 } };
 
 async function boot() {
   await db.init();

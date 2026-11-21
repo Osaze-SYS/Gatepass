@@ -36,6 +36,7 @@ module.exports = {
     checkout: { windowMs: 10 * 60 * 1000, limit: num(process.env.LIMIT_CHECKOUT, 20) },
     refund: { windowMs: 60 * 60 * 1000, limit: num(process.env.LIMIT_REFUND, 10) },
     upload: { windowMs: 60 * 60 * 1000, limit: num(process.env.LIMIT_UPLOAD, 60) },
+    broadcast: { windowMs: 60 * 60 * 1000, limit: num(process.env.LIMIT_BROADCAST, 10) },    // messages to ticket holders
     quote: { windowMs: 10 * 60 * 1000, limit: num(process.env.LIMIT_QUOTE, 60) },       // also slows down anyone guessing discount codes
     api: { windowMs: 60 * 1000, limit: num(process.env.LIMIT_API, 300) },
   },

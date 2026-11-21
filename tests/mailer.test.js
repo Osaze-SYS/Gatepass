@@ -85,3 +85,16 @@ test('payout emails: sent and failed', async () => {
   assert.strictEqual(calls[1].body.subject, 'We could not send your payout for Tech <b>Night</b>');
   assert.ok(calls[1].body.htmlContent.includes('Recipient &lt;invalid&gt;') && calls[1].body.htmlContent.includes('Retry'));
 });
+
+test('messages to ticket holders carry the organizer as reply-to; invitations explain what a team member can do', async () => {
+  const { sendBroadcastEmail, sendTeamInviteEmail } = require('../src/mailer');
+  await sendBroadcastEmail({ to: 'guest@test.dev', name: 'Gina <b>', subject: 'Doors open', body: 'Line one\nLine <i>two</i>', organizerName: 'Ada Okafor', organizerEmail: 'ada@test.dev', eventTitle: 'Tech Night', ticketUrl: 'https://gatepass.example/ticket.html?reference=gp_1' });
+  const m = calls[0].body;
+  assert.deepStrictEqual(m.replyTo, { email: 'ada@test.dev', name: 'Ada Okafor' });
+  assert.ok(m.htmlContent.includes('Line one<br>Line &lt;i&gt;two&lt;/i&gt;') && m.htmlContent.includes('Gina &lt;b&gt;') && m.htmlContent.includes('ticket.html?reference=gp_1') && m.htmlContent.includes('Reply to this email to reach them'));
+  await sendTeamInviteEmail({ to: 'sam@test.dev', name: 'Sam', ownerName: 'Ada <Okafor>', url: 'https://gatepass.example/join.html?token=abc' });
+  const inv = calls[1].body;
+  assert.strictEqual(inv.subject, 'Ada <Okafor> invited you to scan tickets on Gatepass');
+  assert.ok(inv.htmlContent.includes('Ada &lt;Okafor&gt;') && inv.htmlContent.includes('will not see earnings') && inv.htmlContent.includes('join.html?token=abc'));
+  assert.ok(!('replyTo' in inv), 'emails that are not from an organizer have no reply-to');
+});

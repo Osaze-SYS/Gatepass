@@ -3,16 +3,16 @@
   <rect width="1280" height="960" fill="#fff"/>
   <text x="640" y="28" text-anchor="middle" font-size="18" font-weight="bold" fill="#000">Database schema (PostgreSQL)</text>
   <g fill="#fff" stroke="#000" stroke-width="2">
-    <rect x="30" y="60" width="200" height="170"/><rect x="30" y="290" width="200" height="170"/>
+    <rect x="30" y="60" width="200" height="195"/><rect x="30" y="290" width="200" height="170"/>
     <rect x="290" y="60" width="230" height="262"/><rect x="610" y="60" width="300" height="150"/>
     <rect x="290" y="340" width="230" height="130"/><rect x="610" y="290" width="300" height="290"/>
     <rect x="290" y="530" width="230" height="130"/><rect x="610" y="630" width="300" height="110"/><rect x="610" y="780" width="300" height="140"/>
-    <rect x="980" y="60" width="270" height="230"/><rect x="980" y="340" width="270" height="260"/>
+    <rect x="980" y="60" width="270" height="230"/><rect x="980" y="340" width="270" height="260"/><rect x="30" y="510" width="200" height="195"/><rect x="980" y="640" width="270" height="235"/>
   </g>
-  <g stroke="#000" stroke-width="2"><path d="M30,88 H230"/><path d="M30,318 H230"/><path d="M290,88 H520"/><path d="M610,88 H910"/><path d="M290,368 H520"/><path d="M610,318 H910"/><path d="M290,558 H520"/><path d="M610,658 H910"/><path d="M610,808 H910"/><path d="M980,88 H1250"/><path d="M980,368 H1250"/></g>
+  <g stroke="#000" stroke-width="2"><path d="M30,88 H230"/><path d="M30,318 H230"/><path d="M290,88 H520"/><path d="M610,88 H910"/><path d="M290,368 H520"/><path d="M610,318 H910"/><path d="M290,558 H520"/><path d="M610,658 H910"/><path d="M610,808 H910"/><path d="M980,88 H1250"/><path d="M980,368 H1250"/><path d="M30,538 H230"/><path d="M980,668 H1250"/></g>
   <g fill="#000">
     <text x="130" y="80" text-anchor="middle" font-weight="bold" font-size="15">users</text>
-    <text x="42" y="112">id (PK)</text><text x="42" y="132">name</text><text x="42" y="152">email (unique)</text><text x="42" y="172">password_hash</text><text x="42" y="192">email_verified</text><text x="42" y="212">session_version</text>
+    <text x="42" y="112">id (PK)</text><text x="42" y="132">name</text><text x="42" y="152">email (unique)</text><text x="42" y="172">password_hash</text><text x="42" y="192">email_verified</text><text x="42" y="212">session_version</text><text x="42" y="232">role (organizer, scanner)</text><text x="42" y="252">owner_id (FK users)</text>
     <text x="130" y="310" text-anchor="middle" font-weight="bold" font-size="15">payout_accounts</text>
     <text x="42" y="342">user_id (PK, FK users)</text><text x="42" y="362">bank_code, bank_name</text><text x="42" y="382">account_name</text><text x="42" y="402">account_last4 (only 4 digits)</text><text x="42" y="422">recipient_code (Paystack)</text>
     <text x="405" y="80" text-anchor="middle" font-weight="bold" font-size="15">events</text>
@@ -34,14 +34,18 @@
     <text x="622" y="832">id (PK), order_id (FK, unique)</text><text x="622" y="852">reason</text><text x="622" y="872">status: pending, approved, declined</text><text x="622" y="892">decline_note, decided_at</text>
     <text x="1115" y="80" text-anchor="middle" font-weight="bold" font-size="15">discount_codes</text>
     <text x="992" y="112">id (PK)</text><text x="992" y="132">event_id (FK events)</text><text x="992" y="152">code (unique per event)</text><text x="992" y="172">kind: percent or fixed</text><text x="992" y="192">value</text><text x="992" y="212">max_uses (empty = unlimited)</text><text x="992" y="232">used_count</text><text x="992" y="252">expires_at, active</text>
+    <text x="130" y="530" text-anchor="middle" font-weight="bold" font-size="15">team_members</text>
+    <text x="42" y="562">id (PK)</text><text x="42" y="582">owner_id (FK users)</text><text x="42" y="602">name, email (unique)</text><text x="42" y="622">user_id (FK users)</text><text x="42" y="642">invited_at</text><text x="42" y="662">accepted_at</text>
+    <text x="1115" y="660" text-anchor="middle" font-weight="bold" font-size="15">event_messages</text>
+    <text x="992" y="692">id (PK)</text><text x="992" y="712">event_id (FK events)</text><text x="992" y="732">user_id (FK users)</text><text x="992" y="752">ticket_type_id (FK, optional)</text><text x="992" y="772">subject, body</text><text x="992" y="792">recipient_count</text><text x="992" y="812">sent_count, failed_count</text><text x="992" y="832">status: sending, done, interrupted</text><text x="992" y="852">created_at, finished_at</text>
     <text x="1115" y="360" text-anchor="middle" font-weight="bold" font-size="15">payouts</text>
     <text x="992" y="392">id (PK)</text><text x="992" y="412">event_id (FK events)</text><text x="992" y="432">user_id (FK users)</text><text x="992" y="452">amount_kobo, order_count</text><text x="992" y="472">attempt (new reference each)</text><text x="992" y="492">status: pending, processing,</text><text x="992" y="510">success, failed, reversed</text><text x="992" y="530">transfer_code, failure_reason</text><text x="992" y="550">account_label</text>
   </g>
   <g stroke="#000" stroke-width="2" fill="none" marker-end="url(#a)">
     <path d="M230,125 H290"/><path d="M520,125 H610"/><path d="M405,322 V340"/><path d="M760,210 V290"/><path d="M610,520 H520"/><path d="M760,580 V630"/><path d="M910,520 H940 V850 H910"/>
-    <path d="M130,290 V230"/><path d="M1115,60 V44 H405 V60"/><path d="M910,440 H980"/>
+    <path d="M130,290 V255"/><path d="M1115,60 V44 H405 V60"/><path d="M910,440 H980"/>
   </g>
-  <g fill="#000" font-size="12"><text x="234" y="118">1 : many</text><text x="528" y="118">1 : many</text><text x="413" y="335">1 : many</text><text x="768" y="255">1 : many</text><text x="528" y="513">1 : many</text><text x="768" y="610">1 : many</text><text x="948" y="660" transform="rotate(90 948 660)">1 : 1</text><text x="136" y="262">1 : 1</text><text x="918" y="432">many : 1</text></g>
+  <g fill="#000" font-size="12"><text x="234" y="118">1 : many</text><text x="528" y="118">1 : many</text><text x="413" y="335">1 : many</text><text x="768" y="255">1 : many</text><text x="528" y="513">1 : many</text><text x="768" y="610">1 : many</text><text x="948" y="660" transform="rotate(90 948 660)">1 : 1</text><text x="140" y="279">1 : 1</text><text x="918" y="432">many : 1</text></g>
   <text x="30" y="840" font-size="12" fill="#000">Money is stored in kobo (integers).</text>
   <text x="30" y="858" font-size="12" fill="#000">Ticket codes are the id plus an HMAC signature, so they cannot be forged.</text>
   <text x="30" y="876" font-size="12" fill="#000">Deleting an event hides it (deleted_at); sales and refund history are kept.</text>

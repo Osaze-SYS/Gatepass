@@ -39,15 +39,23 @@ function readToken(token, purpose = 's') {
 const fingerprint = (passwordHash) => hmac('pw:' + passwordHash).slice(0, 16);
 
 // Checks the token and that the account's session version still matches, so resetting a password logs every device out.
-async function requireAuth(req, res, next) {
-  try {
-    const data = readToken((req.get('authorization') || '').replace(/^Bearer /, ''));
-    if (!data) return res.status(401).json({ error: 'Please log in.' });
-    const row = (await db.query('SELECT session_version FROM users WHERE id = $1', [data.uid])).rows[0];
-    if (!row || (data.x ?? 0) !== row.session_version) return res.status(401).json({ error: 'Please log in again.' });
-    req.userId = data.uid;
-    next();
-  } catch (err) { next(err); }
+// requireAuth is for organizers only. requireTeam also lets scanner team members through (used by the gate scanner).
+// req.ownerId is the organizer whose events the person may work with: themselves, or the organizer a scanner works for.
+function authenticate(allowTeam) {
+  return async (req, res, next) => {
+    try {
+      const data = readToken((req.get('authorization') || '').replace(/^Bearer /, ''));
+      if (!data) return res.status(401).json({ error: 'Please log in.' });
+      const row = (await db.query('SELECT session_version, role, owner_id FROM users WHERE id = $1', [data.uid])).rows[0];
+      if (!row || (data.x ?? 0) !== row.session_version) return res.status(401).json({ error: 'Please log in again.' });
+      if (row.role !== 'organizer' && !allowTeam) return res.status(403).json({ error: 'This area is only for the event organizer.' });
+      req.userId = data.uid;
+      req.role = row.role;
+      req.ownerId = row.role === 'scanner' ? row.owner_id : data.uid;
+      next();
+    } catch (err) { next(err); }
+  };
 }
+const requireAuth = authenticate(false), requireTeam = authenticate(true);
 
-module.exports = { hashPassword, verifyPassword, issueToken, readToken, requireAuth, fingerprint, hmac };
+module.exports = { hashPassword, verifyPassword, issueToken, readToken, requireAuth, requireTeam, fingerprint, hmac };

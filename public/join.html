@@ -1,0 +1,33 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Join the team · Gatepass</title><link rel="stylesheet" href="/css/style.css"><link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><meta name="theme-color" content="#1d4ed8"></head><body>
+<header id="top"></header>
+<main><div class="container rise-kids" style="max-width:32rem;padding-top:3rem"><div class="card stack" id="box" aria-live="polite"><p class="muted"><span class="spinner"></span> Opening your invitation…</p></div></div></main>
+<script src="/js/common.js"></script>
+<script>
+(async () => {
+  const box = document.querySelector('#box');
+  const token = new URLSearchParams(location.search).get('token') || '';
+  let info;
+  try { info = await api('/api/auth/join-info?token=' + encodeURIComponent(token)); }
+  catch (e) { box.innerHTML = `<h1 style="font-size:2rem">We could not open this invitation</h1><p class="muted">${esc(e.message)}</p><a class="btn" href="/">Go to Gatepass</a>`; return; }
+  box.innerHTML = `<span class="badge">Team invitation</span><h1 style="font-size:2rem">Join ${esc(info.ownerName)}'s team</h1>
+    <p class="muted">Hi ${esc(info.name)}, you can scan guests in at the gate. You will not see earnings, orders or settings. Choose a password to accept.</p>
+    <form id="join" novalidate>
+      <div class="field"><label for="em">Your email</label><input id="em" value="${esc(info.email)}" readonly></div>
+      <div class="field"><label for="p1">Choose a password</label><input id="p1" type="password" autocomplete="new-password" minlength="8"><div class="hint">Use at least 8 characters.</div></div>
+      <div class="field"><label for="p2">Type it again</label><input id="p2" type="password" autocomplete="new-password"></div>
+      <div id="msg" role="alert"></div><button class="btn lg block" id="go">Accept and join</button>
+    </form>`;
+  document.querySelector('#join').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.querySelector('#msg'), p1 = document.querySelector('#p1').value, p2 = document.querySelector('#p2').value;
+    if (p1.length < 8) { msg.innerHTML = '<p class="notice err">Use a password of at least 8 characters.</p>'; return; }
+    if (p1 !== p2) { msg.innerHTML = '<p class="notice err">The two passwords are not the same.</p>'; return; }
+    document.querySelector('#go').disabled = true;
+    try {
+      await api('/api/auth/join', { token, password: p1 });
+      box.innerHTML = `<div class="center stack"><span class="badge ok">You are in</span><h1 style="font-size:2rem">Welcome to the team</h1><p class="muted">Log in with your email and the password you just chose, then open the scanner.</p><a class="btn lg" href="/organizer.html">Log in</a></div>`;
+    } catch (err) { msg.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; document.querySelector('#go').disabled = false; }
+  });
+})();
+</script></body></html>

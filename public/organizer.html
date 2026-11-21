@@ -8,7 +8,8 @@ const app = document.querySelector('#app');
 const $ = (s) => document.querySelector(s);
 let meta, events = [], tab = 'overview', picked = [];
 const open = new Set(), ordersCache = {}, salesCache = {}, codesCache = {};
-let payoutData = null, banks = null, showArchived = false;
+let payoutData = null, banks = null, showArchived = false, teamData = null;
+const msgCache = {};
 
 const feeText = () => `Gatepass charges ${meta.feePercent}% per paid ticket. ${meta.feePayer === 'buyer' ? 'Buyers pay it on top, so you keep your full ticket price.' : 'It is deducted from your payout.'} Free tickets cost nothing.`;
 const statusBadge = (s) => ({ paid: '<span class="badge ok">Paid</span>', refunded: '<span class="badge">Refunded</span>', refund_due: '<span class="badge warn">Needs refund</span>', refund_pending: '<span class="badge warn">Refund pending</span>' }[s] || esc(s));
@@ -42,7 +43,7 @@ function auth() {
     try {
       const out = await api('/api/auth/' + (mode === 'login' ? 'login' : 'register'), { name: $('#aname').value, email, password: $('#apass').value, remember });
       if (out.needsVerification) { setMode('login'); $('#apass').value = ''; b.disabled = false; confirmEmailDialog(email); return; }   // account made, now confirm the email
-      setSession(out.token, out.name, remember);
+      setSession(out.token, out.name, remember, out.role);
       if (mode === 'login') { if (remember) localStorage.setItem('gp_email', email); else localStorage.removeItem('gp_email'); }
       location.reload();
     } catch (err) {
@@ -101,12 +102,24 @@ async function load() {
 }
 async function loadOrders(id) { ordersCache[id] = await api(`/api/organizer/events/${id}/orders`); }
 
+// Team members (scanners) get a small home page: they cannot see anything about money, orders or settings.
+async function staffHome() {
+  let me = {};
+  try { me = await api('/api/me'); } catch (e) { if (e.status === 401) { clearSession(); location.reload(); return; } }
+  app.innerHTML = `<div class="container rise-kids" style="max-width:34rem;padding-top:3rem"><div class="card center stack"><span class="badge">Team member</span>
+    <h1 style="font-size:2rem">Hi, ${esc((me.name || getName()).split(' ')[0] || 'there')}</h1>
+    <p class="muted">You are signed in as a scanner for <b>${esc(me.ownerName || 'your organizer')}</b>. You can check guests in at the gate. Earnings, orders and settings are only visible to the organizer.</p>
+    <a class="btn lg" href="/scan.html">Open the scanner</a><button class="btn secondary" id="logout2">Log out</button></div></div>`;
+  $('#logout2').onclick = () => { clearSession(); location.href = '/'; };
+}
+
 async function dashboard() {
+  if (getRole() === 'scanner') return staffHome();
   await load();
   app.innerHTML = `<div class="container rise-kids" style="padding-top:2rem">
     <div class="row spread"><div><h1 style="font-size:2.1rem;margin:0">Hi, ${esc(getName().split(' ')[0] || 'there')}</h1><p class="muted" style="margin:0">Manage your events, sales and guests.</p></div>
       <div class="row"><a class="btn secondary" href="/scan.html">Scan tickets</a><button class="btn secondary" id="logout">Log out</button></div></div>
-    <div class="tabs" role="tablist" id="tabs">${[['overview', 'Overview'], ['events', 'My events'], ['payouts', 'Payouts'], ['create', 'Create event']].map(([k, l]) => `<button role="tab" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div class="tabs" role="tablist" id="tabs">${[['overview', 'Overview'], ['events', 'My events'], ['payouts', 'Payouts'], ['team', 'Team'], ['create', 'Create event']].map(([k, l]) => `<button role="tab" data-tab="${k}">${l}</button>`).join('')}</div>
     <div id="panel"></div></div>`;
   $('#logout').onclick = () => { clearSession(); location.href = '/'; };
   $('#tabs').onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) { if (b.dataset.tab === 'create' && tab !== 'create') editing = null; tab = b.dataset.tab; render(); } };
@@ -118,10 +131,11 @@ async function dashboard() {
 function render() {
   document.querySelectorAll('#tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $('#tabs [data-tab="create"]').textContent = editing ? 'Edit event' : 'Create event';
-  $('#panel').innerHTML = { overview, events: eventsTab, payouts: payoutsTab, create: createTab }[tab]();
+  $('#panel').innerHTML = { overview, events: eventsTab, payouts: payoutsTab, team: teamTab, create: createTab }[tab]();
   if (tab === 'create') initCreate();
   if (tab === 'overview') loadOverviewCharts();
   if (tab === 'payouts') loadPayouts();
+  if (tab === 'team') loadTeam();
 }
 
 function overview() {
@@ -176,6 +190,58 @@ function codesPanel(e) {
       <div class="field"><label>Max uses (optional)</label><input class="c-max" type="number" min="1" step="1" placeholder="Unlimited"></div>
       <div class="field"><label>Expires (optional)</label><input class="c-exp" type="datetime-local"></div>
       <div class="field"><button class="btn" data-act="add-code" data-ev="${e.id}">Add code</button></div></div></div>`;
+}
+
+// ---------------------------------------------------------------- team
+const teamTab = () => '<div id="team-box"><p class="muted"><span class="spinner"></span> Loading…</p></div>';
+async function loadTeam(extra) {
+  const box = $('#team-box'); if (!box) return;
+  try { teamData = await api('/api/organizer/team'); } catch (err) { box.innerHTML = `<p class="notice err">${esc(err.message)}</p>`; return; }
+  drawTeam(extra);
+}
+function drawTeam(extra = '') {
+  const box = $('#team-box'); if (!box || !teamData) return;
+  box.innerHTML = `<div class="card"><h2>Your team</h2>
+      <p class="muted">Invite people to scan tickets at the gate. They get their own login and can only use the scanner. They never see earnings, orders, guest lists or settings, and you can remove someone at any time.</p>
+      <div class="inline-form"><div class="field"><label for="tm-name">Name</label><input id="tm-name" maxlength="80" placeholder="Sam Scanner"></div>
+        <div class="field"><label for="tm-email">Email</label><input id="tm-email" type="email" placeholder="sam@example.com"></div>
+        <div class="field"><button class="btn" data-act="invite-member">Send invitation</button></div></div>
+      <div id="tm-result" role="status" style="margin-top:.6rem">${extra}</div></div>
+    ${teamData.length ? `<div class="card flat table-wrap" style="margin-top:1rem"><table><thead><tr><th>Name</th><th>Email</th><th>Status</th><th></th></tr></thead><tbody>${teamData.map((m) => `<tr><td>${esc(m.name)}</td><td>${esc(m.email)}</td>
+      <td>${m.status === 'active' ? '<span class="badge ok">Active</span>' : '<span class="badge warn">Invited</span>'}</td>
+      <td><div class="row" style="flex-wrap:nowrap">${m.status === 'invited' ? `<button class="btn sm secondary" data-act="resend-member" data-id="${m.id}">Send again</button>` : ''}<button class="btn sm danger outline" data-act="remove-member" data-id="${m.id}" data-name="${esc(m.name)}">Remove</button></div></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin-top:1rem">No team members yet.</p>'}`;
+}
+// With no email service set up, the invitation link is shown so the organizer can pass it on.
+const linkNotice = (url) => url ? `<div class="notice info small">No email service is set up here, so pass this link to your team member:<br><input readonly value="${esc(url)}" style="margin-top:.4rem" aria-label="Invitation link"></div>` : '';
+
+// ---------------------------------------------------------------- messages to ticket holders
+async function loadMsg(id) { const [audience, history] = await Promise.all([api(`/api/organizer/events/${id}/audience`), api(`/api/organizer/events/${id}/messages`)]); msgCache[id] = { audience, history }; }
+const peopleIn = (m, typeId) => (typeId ? Number((m.audience.byType.find((t) => t.id === Number(typeId)) || {}).people || 0) : Number(m.audience.total));
+const sendLabel = (n) => `Send to ${n} ${n === 1 ? 'person' : 'people'}`;
+const msgStatus = (st) => ({ sending: '<span class="badge warn">Sending</span>', done: '<span class="badge ok">Done</span>', interrupted: '<span class="badge bad">Interrupted</span>' }[st] || esc(st));
+function msgHistory(history) {
+  return history.length ? `<div class="table-wrap"><table><thead><tr><th>Subject</th><th>To</th><th>Sent</th><th>Status</th><th>When</th></tr></thead><tbody>${history.map((h) => `<tr><td>${esc(h.subject)}</td><td>${esc(h.ticket_name || 'Everyone')}</td>
+    <td>${h.sent_count} of ${h.recipient_count}${h.failed_count ? ` <span class="badge bad">${h.failed_count} failed</span>` : ''}</td><td>${msgStatus(h.status)}</td><td>${esc(fmtShort(h.created_at))}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">You have not sent any messages for this event yet.</p>';
+}
+function msgPanel(e) {
+  const m = msgCache[e.id];
+  if (!m) return '<div class="card flat" style="margin-top:1rem"><span class="spinner"></span> Loading…</div>';
+  return `<div class="card flat" style="margin-top:1rem" id="msg-${e.id}"><h3>Email ticket holders</h3>
+    <p class="muted small">Send a message to everyone who holds a ticket. Refunded and unpaid orders are skipped, and each person gets it once. It is plain text, and replies come to your email.</p>
+    ${Number(m.audience.total) === 0 ? '<p class="muted">Nobody holds a ticket for this event yet.</p>' : `
+    <div class="field"><label>Send to</label><select class="m-type"><option value="">Everyone with a ticket (${m.audience.total})</option>${m.audience.byType.filter((t) => Number(t.people) > 0).map((t) => `<option value="${t.id}">${esc(t.name)} ticket holders (${t.people})</option>`).join('')}</select></div>
+    <div class="field"><label>Subject</label><input class="m-subject" maxlength="120" placeholder="Doors open at 6pm"></div>
+    <div class="field"><label>Message</label><textarea class="m-body" rows="5" maxlength="2000" placeholder="Write your message"></textarea><div class="hint">Plain text, up to 2000 characters.</div></div>
+    <div class="row"><button class="btn secondary" data-act="msg-test" data-ev="${e.id}">Send a test to me</button><button class="btn" data-act="msg-send" data-ev="${e.id}">${sendLabel(Number(m.audience.total))}</button></div>`}
+    <h4 style="margin:1.2rem 0 .4rem">Sent messages</h4><div id="msg-hist-${e.id}">${msgHistory(m.history)}</div></div>`;
+}
+// After a send, keep the history fresh until it finishes (only the history is redrawn, so nothing typed is lost).
+async function watchMsg(id, tries = 0) {
+  await sleep(1500);
+  try { msgCache[id].history = await api(`/api/organizer/events/${id}/messages`); } catch (err) { return; }
+  const box = document.querySelector(`#msg-hist-${id}`);
+  if (box) box.innerHTML = msgHistory(msgCache[id].history);
+  if (box && tries < 20 && msgCache[id].history[0] && msgCache[id].history[0].status === 'sending') watchMsg(id, tries + 1);
 }
 
 // ---------------------------------------------------------------- payouts
@@ -247,11 +313,11 @@ function eventCard(e) {
       <td><div class="row"><div class="bar"><i style="width:${Math.round(Number(x.issued) / x.capacity * 100)}%"></i></div><span class="small">${x.issued} / ${x.capacity}</span></div></td><td>${x.checked_in}</td></tr>`).join('')}</tbody></table></div>
     <div class="row" style="margin-top:1rem">${editable ? `<button class="btn sm" data-act="edit" ${mine}>Edit event</button>` : ''}${archived ? '' : `<button class="btn secondary sm" data-act="toggle" data-key="pics-${e.id}">Pictures (${e.images.length})</button>`}
       <button class="btn secondary sm" data-act="toggle" data-key="orders-${e.id}">Orders and refunds${attention ? ` <span class="badge warn">${attention}</span>` : ''}</button>
-      <button class="btn secondary sm" data-act="toggle" data-key="sales-${e.id}">Sales</button>${editable ? `<button class="btn secondary sm" data-act="toggle" data-key="codes-${e.id}">Discount codes</button>` : ''}</div>
+      <button class="btn secondary sm" data-act="toggle" data-key="sales-${e.id}">Sales</button>${archived ? '' : `<button class="btn secondary sm" data-act="toggle" data-key="msg-${e.id}">Email ticket holders</button>`}${editable ? `<button class="btn secondary sm" data-act="toggle" data-key="codes-${e.id}">Discount codes</button>` : ''}</div>
     <div class="row" style="margin-top:.5rem"><a class="btn quiet sm" href="/event.html?id=${e.id}" target="_blank" rel="noopener">View public page</a><button class="btn quiet sm" data-act="copy" ${mine}>Copy link</button><button class="btn quiet sm" data-act="export" ${mine}>Download guest list (CSV)</button>
       <span class="row" style="margin-left:auto">${archived ? `<button class="btn sm" data-act="unarchive" ${mine}>Restore</button>`
         : `${cancelled ? (openOrders ? `<button class="btn sm" data-act="cancel-event" ${mine}>Continue refunds</button>` : '') : (!started ? `<button class="btn danger outline sm" data-act="cancel-event" ${mine}>Cancel event</button>` : '')}${canArchive ? `<button class="btn secondary sm" data-act="archive" ${mine}>Archive</button>` : ''}`}${canDelete ? `<button class="btn danger outline sm" data-act="delete" ${mine}>Delete event</button>` : ''}</span></div>
-    ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}${open.has('sales-' + e.id) ? salesPanel(e) : ''}${open.has('codes-' + e.id) ? codesPanel(e) : ''}</article>`;
+    ${open.has('pics-' + e.id) ? picsPanel(e) : ''}${open.has('orders-' + e.id) ? ordersPanel(e) : ''}${open.has('sales-' + e.id) ? salesPanel(e) : ''}${open.has('codes-' + e.id) ? codesPanel(e) : ''}${open.has('msg-' + e.id) ? msgPanel(e) : ''}</article>`;
 }
 
 function eventsTab() {
@@ -333,6 +399,10 @@ function initCreate() {
 // ---------------------------------------------------------------- actions
 async function onChange(e) {
   const input = e.target;
+  if (input.classList && input.classList.contains('m-type')) {
+    const panel = input.closest('[id^="msg-"]'), id = panel.id.slice(4);
+    panel.querySelector('[data-act="msg-send"]').textContent = sendLabel(peopleIn(msgCache[id], input.value));
+  }
   if (input.id === 'pics') {
     for (const f of [...input.files]) {
       if (picked.length >= meta.maxImages) { toast(`You can add up to ${meta.maxImages} pictures.`, 'err'); break; }
@@ -361,7 +431,7 @@ async function onClick(e) {
       if (open.has(d.key)) open.delete(d.key);
       else {
         open.add(d.key);
-        const [kind, id] = d.key.split('-'), loader = { orders: loadOrders, sales: loadSales, codes: loadCodes }[kind];
+        const [kind, id] = d.key.split('-'), loader = { orders: loadOrders, sales: loadSales, codes: loadCodes, msg: loadMsg }[kind];
         if (loader) { render(); await loader(id); }
       }
       render();
@@ -421,6 +491,32 @@ async function onClick(e) {
     else if (d.act === 'archive') { await api(`/api/organizer/events/${d.ev}/archive`, {}); toast('Event archived. It still counts in your totals and payouts.'); await load(); render(); }
     else if (d.act === 'unarchive') { await api(`/api/organizer/events/${d.ev}/unarchive`, {}); toast('Event restored.'); await load(); render(); }
     else if (d.act === 'toggle-archived') { showArchived = !showArchived; render(); }
+    else if (d.act === 'invite-member') {
+      const out = await api('/api/organizer/team', { name: $('#tm-name').value, email: $('#tm-email').value });
+      toast('Invitation sent.'); await loadTeam(linkNotice(out.inviteUrl));
+    }
+    else if (d.act === 'resend-member') { const out = await api(`/api/organizer/team/${d.id}/resend`, {}); toast('Invitation sent again.'); await loadTeam(linkNotice(out.inviteUrl)); }
+    else if (d.act === 'remove-member') {
+      const { ok } = await confirmDialog({ title: `Remove ${d.name}?`, text: 'They lose access straight away and can no longer scan tickets.', confirmLabel: 'Remove', danger: true });
+      if (ok) { await api(`/api/organizer/team/${d.id}`, null, 'DELETE'); toast('Team member removed.'); await loadTeam(); }
+    }
+    else if (d.act === 'msg-send' || d.act === 'msg-test') {
+      const panel = document.querySelector(`#msg-${d.ev}`), subject = panel.querySelector('.m-subject').value.trim(), body = panel.querySelector('.m-body').value.trim(), typeId = panel.querySelector('.m-type').value, test = d.act === 'msg-test';
+      if (!subject || !body) { toast('Write a subject and a message first.', 'err'); return; }
+      if (!test) {
+        const n = peopleIn(msgCache[d.ev], typeId);
+        const { ok } = await confirmDialog({ title: `Send to ${n} ${n === 1 ? 'person' : 'people'}?`, text: 'Everyone selected gets this email now, and you cannot unsend it. Sending a test to yourself first is a good idea.', confirmLabel: 'Send message' });
+        if (!ok) return;
+      }
+      b.disabled = true;
+      await api(`/api/organizer/events/${d.ev}/message`, { subject, body, ticketTypeId: typeId ? Number(typeId) : undefined, testOnly: test });
+      if (test) { toast('A test was sent to your email.'); b.disabled = false; return; }
+      toast('Sending now. The list below shows how it is going.');
+      panel.querySelector('.m-subject').value = ''; panel.querySelector('.m-body').value = ''; b.disabled = false;
+      msgCache[d.ev].history = await api(`/api/organizer/events/${d.ev}/messages`);
+      document.querySelector(`#msg-hist-${d.ev}`).innerHTML = msgHistory(msgCache[d.ev].history);
+      watchMsg(d.ev);
+    }
     else if (d.act === 'add-type') { $('#types').insertAdjacentHTML('beforeend', typeRow()); }
     else if (d.act === 'rm-type') {
       const row = b.closest('.type-row');

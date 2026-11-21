@@ -151,6 +151,32 @@ async function init() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0;       -- bumped on password reset: ends every login
     ALTER TABLE events ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;                        -- cancelled events stop selling and are refunded
     ALTER TABLE events ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'organizer';           -- 'scanner' = a team member who can only scan tickets
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id);             -- the organizer a scanner works for
+    CREATE TABLE IF NOT EXISTS team_members (
+      id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      owner_id INTEGER NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,      -- filled in when the invitation is accepted
+      invited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      accepted_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS event_messages (                      -- messages an organizer sent to their ticket holders
+      id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      ticket_type_id INTEGER REFERENCES ticket_types(id),
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      recipient_count INTEGER NOT NULL,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'sending' CHECK (status IN ('sending','done','interrupted')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_event ON event_messages(event_id, created_at);
     ALTER TABLE events ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;                         -- archived events leave the main list but keep counting in totals
 
     CREATE TABLE IF NOT EXISTS discount_codes (

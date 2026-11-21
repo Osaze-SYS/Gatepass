@@ -17,6 +17,8 @@ Built as a portfolio project to show a complete, realistic system: accounts, pay
 - **Tickets:** signed QR codes on a ticket page (printable) and by email.
 - **Manage events:** organizers can edit an event until it starts (details, date, refund policy, ticket prices and numbers, add or remove ticket types) and delete it once it has started or been cancelled; a changed date or venue is emailed to everyone who bought tickets.
 - **Archive:** finished events can be tucked into a collapsed Archived section and restored with one click. They still count in totals, charts, guest lists and payouts. Past events no longer offer editing or new discount codes.
+- **Team members:** organizers invite people by email to scan tickets at the gate. Each gets their own login that opens only the scanner: no earnings, orders, guest lists or settings. Removing someone ends their access at once.
+- **Email ticket holders:** send a plain-text message to everyone with a ticket for an event, or just one ticket type. People with several orders get it once, refunded and unpaid orders are skipped, replies go to the organizer, there is a test send, a confirmation, and a history of every send.
 - **Cancel an event:** one click stops sales, releases unpaid holds, and refunds every order in full, emailing each buyer. It can be run again to finish any refunds that failed.
 - **Discount codes:** percent-off or fixed-amount codes per event, with a use limit and an expiry; buyers see the new total before paying, and a 100% code makes the order free.
 - **Sales charts and exports:** tickets and earnings per day (last 30 days) for all events or one event, a split by ticket type, and the guest list as a CSV file for Excel.
@@ -40,7 +42,7 @@ npm install
 cp .env.example .env        # Windows: copy .env.example .env   then set APP_SECRET
 npm run seed                # demo organizer + 4 events with pictures
 npm start                   # http://localhost:3000
-npm test                    # 60 automated tests
+npm test                    # 70 automated tests
 ```
 
 Demo organizer: `demo@gatepass.dev` / `password123`.
@@ -123,6 +125,10 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 
 **Archiving versus deleting.** Delete hides an event for good: it leaves the totals, charts and guest list. Archive only moves a finished event into a collapsed section and takes it off public browsing, so every number, export and payout stays intact, and it can be restored. An event can be archived once it has started (or been cancelled and fully refunded), and never while a refund decision is waiting, so nothing that needs attention can be hidden. If something needing attention appears on an archived event later, the archive section opens by itself.
 
+**Team members.** A team member is a user with the role `scanner` who points at an organizer. Every organizer route requires the `organizer` role, so a scanner is refused with 403 everywhere except the gate scanner, which compares each ticket's organizer with the organizer the scanner works for (`req.ownerId`). Invitations are single-use signed links that expire after 7 days, the invited email must not already have an account, and removing a member deletes their login so their next request fails. A team is limited to 20 members.
+
+**Messages to ticket holders.** Recipients are the distinct buyer emails of paid orders for that event (optionally one ticket type), so people with several orders get one email and refunded or unpaid orders are skipped. To keep it from being used as a spam tool it is plain text only (no links or formatting are made clickable), limited to 10 messages per event per day and 10 sends per hour per visitor, refuses an identical message sent twice within 10 minutes, asks for confirmation, and records every send. Replies go to the organizer through the email's Reply-To. Sending happens in the background and the history shows progress; a send cut short by a restart is shown as interrupted.
+
 **Platform fee.** Per ticket: `round(price x percent) + flat`. Each order stores the subtotal, fee, amount charged and organizer payout, so reports never have to recompute history when rates change. With `FEE_PAYER=buyer` the fee is added on top; with `organizer` it is deducted from the payout.
 
 **Pictures in the database.** Stored as `BYTEA`, so they survive hosts with temporary disks. The browser shrinks photos to at most 1600 px wide before upload; the server checks the real file signature (not just the declared type), limits the size, and serves them with long cache headers.
@@ -161,13 +167,19 @@ Email contains the online ticket link, the QR codes, and refund notices. Names i
 | POST | `/api/organizer/orders/:reference/refund-request/decide` | Approve or decline a buyer's request (auth) |
 | POST | `/api/organizer/events/:id/cancel` | Cancel an event and refund everyone; call again to finish (auth) |
 | POST | `/api/organizer/events/:id/archive`, `/unarchive` | Tuck a finished event away, or bring it back (auth) |
+| GET, POST | `/api/organizer/team` | List team members, invite one (auth) |
+| POST, DELETE | `/api/organizer/team/:id/resend`, `/api/organizer/team/:id` | Send an invitation again, remove a member (auth) |
+| GET, POST | `/api/auth/join-info`, `/api/auth/join` | See and accept a team invitation |
+| GET | `/api/me` | Who is logged in and their role (organizer or scanner) |
+| GET | `/api/organizer/events/:id/audience`, `/messages` | How many people a message would reach, and what was sent (auth) |
+| POST | `/api/organizer/events/:id/message` | Send a message to ticket holders, or a test to yourself (auth) |
+| POST | `/api/checkin` | Validate and consume a ticket (organizer or team member) |
 | GET, POST | `/api/organizer/events/:id/discounts` | List and add discount codes (auth) |
 | POST | `/api/organizer/events/:id/discounts/:codeId/toggle` | Turn a code on or off (auth) |
 | GET | `/api/organizer/sales?event=&days=` | Sales per day and per ticket type (auth) |
 | GET | `/api/organizer/events/:id/export.csv` | Guest list as a CSV file (auth) |
 | GET, PUT | `/api/organizer/payouts`, `/api/organizer/payout-account` | Payout overview, save the bank account (auth) |
 | POST | `/api/organizer/payout-account/resolve`, `/api/organizer/payouts/:id/retry` | Check an account name, retry a failed payout (auth) |
-| POST | `/api/checkin` | Validate and consume a ticket (auth) |
 
 ## Configuration
 
@@ -182,7 +194,8 @@ Use a host that runs Node (Render, Railway, Fly.io). Set `APP_SECRET`, `BASE_URL
 - Live Paystack transfers (payouts) and refunds were built to Paystack's documentation but could not be tested against a real account here. Run test-mode payments, a refund and a small payout before relying on them.
 - Refunds that Paystack settles later are treated as done once Paystack accepts them; add a refund webhook to track final settlement.
 - One payout is made per event, after the delay. Earnings from sales made after that point go out in a later payout.
-- Add two-factor login for organizers, and a per-code usage report.
+- Team members can scan for all of an organizer's events; there is no per-event restriction yet, and an invited email cannot already have an account.
+- Add two-factor login for organizers, a per-code usage report, and a record of which team member scanned each ticket.
 - Move pictures to object storage (S3 or similar) if galleries grow large, and add a job queue for emails and payouts when running several servers.
 
 ## Project layout
@@ -192,6 +205,8 @@ server.js            API routes
 src/db.js            PostgreSQL layer (pg or PGlite) and schema
 src/orders.js        reservation, expiry, fulfilment, refunds, discount codes, cancellation
 src/payouts.js       bank accounts, payout claiming, sending and tracking
+src/team.js          team member invitations and removal
+src/broadcast.js     messages from an organizer to their ticket holders
 src/fees.js          platform fee maths
 src/payments.js      Paystack (payments, refunds, transfers) and practice mode
 src/tickets.js       signed codes and QR images
@@ -199,8 +214,8 @@ src/images.js        picture validation
 src/ratelimit.js     rate limiters
 src/auth.js          passwords, login tokens, session versions
 src/mailer.js        all emails
-public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation, password reset
+public/              pages: browse, event, ticket, organizer dashboard, scanner, email confirmation, password reset, team invitation
 seed.js, seed-images demo data
-tests/               60 automated tests
+tests/               70 automated tests
 docs/                architecture and schema diagrams (SVG)
 ```
